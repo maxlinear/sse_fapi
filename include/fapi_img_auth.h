@@ -22,6 +22,7 @@
 #define _IMG_AUTH_FAPI__
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <sys/stat.h>
 
 #define MAX_SS_BUF_SIZE  16
@@ -124,20 +125,20 @@ typedef struct uboot_value{
 */
 int fapi_ssImgAuth(img_param_t image_auth);
 
-#ifdef IMG_AUTH
-/*! 
-        \brief API to authenticate image
-        \return  UGW_SUCCESS on successful / UGW_FAILURE on failure
-*/
-int fapi_ssImgValidateAndCommit(void);
-#endif
 #ifdef LINUX_UPGRADE
 /*! 
         \brief API to authenticate image
         \param[in] image type
+        \param[in] image length
         \return  UGW_SUCCESS on successful / UGW_FAILURE on failure
 */
-int fapi_ssImgCopyImgBPtoBP(char *image_type, int bp);
+int fapi_ssImgValidateAndCommit(char *image_type, int len);
+/*! 
+        \brief API to Upgrade image to partition
+        \param[in] image_auth image_auth_t structure
+        \return  UGW_SUCCESS on successful / UGW_FAILURE on failure
+*/
+int fapi_ssImgUpgrade(img_param_t image_auth);
 #endif
 /*! 
         \brief API to get upgrade state 
@@ -193,9 +194,10 @@ int fapi_ssSetUbootParam(char *pname, uboot_value_t *pvalue);
         \brief API to get uboot param 
         \param[in] pname 
         \param[out] pvalue 
+        \param[in] env_valid
         \return  UGW_SUCCESS on successful / UGW_FAILURE on failure
 */
-int fapi_ssGetUbootParam(char *pname, uboot_value_t *pvalue);
+int fapi_ssGetUbootParam(char *pname, uboot_value_t *pvalue, bool env_valid);
 
 /*! 
         \brief API to set udt param 
@@ -205,6 +207,40 @@ int fapi_ssGetUbootParam(char *pname, uboot_value_t *pvalue);
 */
 int fapi_ssSetUdt(unsigned char *pvalue,uint32_t ivalue);
 
+/*! 
+        \brief API to do image upgrade from linux 
+        \param[in] path 
+        \return 0 on successful / error code on failure
+*/
+int fapi_Image_upgrade(const char *path);
+
+/*! 
+        \brief API to perform commit 
+        \param[in] 
+        \return 0 on successful / error code on failure
+*/
+int fapi_Image_commit(void);
+
+/*! 
+        \brief API to get last upgrade status 
+        \param[out] value  
+        \return 0 on successful / error code on failure
+*/
+int fapi_Get_lastupg_status(char *value);
+
+/*! 
+        \brief API to perform commit 
+        \param[out] value 
+        \return 0 on successful / error code on failure
+*/
+int fapi_Get_lastupg_time(char *value);
+
+/*!
+        \brief API to switch bank
+        \param[in] actbnk
+        \return 0 on successful / error code on failure
+*/
+int fapi_Switch_bank(char *actbnk);
 #endif
 
 /* @} */

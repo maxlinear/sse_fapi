@@ -433,6 +433,10 @@ int readenv(void)
 			/* if we get flags as 255 and 0, then 0 is latest */
 			active_cfg = 2;
 			env = envB;
+		} else if (env.flags == 0 && envB.flags == 255) {
+			active_cfg = 1;
+		} else if (env.flags > envB.flags) {
+			active_cfg = 1;
 		} else if (envB.flags > env.flags) {
 			active_cfg = 2;
 			env = envB;
@@ -448,6 +452,12 @@ int readenv(void)
 	}
 
 	return 0;
+}
+
+/* UGW_SW-87803: This is a wrapper function called from fwupgrade daemon */
+int read_env(void)
+{
+	return readenv();
 }
 
 int envmatch(char *s1, int i2)
@@ -665,7 +675,10 @@ int mtdwrite(void)
 	int len = 0, total_len = 0;
 
 	if (active_cfg <= 2) {
-		fd = open(getEnvAdev(), O_WRONLY | O_TRUNC | O_CREAT, 0644);
+		if (active_cfg < 2)
+			fd = open(getEnvBdev(), O_WRONLY | O_TRUNC | O_CREAT, 0644);
+		else
+			fd = open(getEnvAdev(), O_WRONLY | O_TRUNC | O_CREAT, 0644);
 		if (fd < 0) {
 			printf("Saving enviornment failed for NAND\n");
 			return 1;

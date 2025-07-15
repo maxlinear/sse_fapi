@@ -16,7 +16,7 @@ CFLAGS += -DCONFIG_SYS_REDUNDAND_ENVIRONMENT=1
 
 bins := libsecurefapi.so
 ifeq ($(LGM_SECURE),1)
-bins += sse_test_app sse_ctest_util secdbg_ctest
+bins += sse_test_app sse_ctest_util secdbg_ctest secdbg_test_app
 endif
 
 ifeq ($(LGM_SECURE),1)

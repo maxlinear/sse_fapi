@@ -1,6 +1,6 @@
 /******************************************************************************
 
-  Copyright (C) 2020-2022 MaxLinear, Inc.
+  Copyright (C) 2020-2024 MaxLinear, Inc.
   Copyright (C) 2019 Intel Corporation
   Lantiq Beteiligungs-GmbH & Co. KG
   Lilienthalstrasse 15, 85579 Neubiberg, Germany 
@@ -33,9 +33,9 @@
 #include "help_error.h"
 #include "help_logging.h"
 
-#include "libsafec/safe_str_lib.h"
-#include "libsafec/safe_lib.h"
-#include "libsafec/safe_mem_lib.h"
+#include "safe_str_lib.h"
+#include "safe_lib.h"
+#include "safe_mem_lib.h"
 
 #ifdef LGM_SECURE
 #include <secure_services.h>
@@ -328,7 +328,7 @@ int fapi_ssFRead(sse_param_t *pxSSEParamList)
 
 	/* if caller sends empty allocated buffer, it means read the content from the path*/
 	if (!pxSSEParamList->len) {
-		if(pxSSEParamList->sPath[0] != '\0'){
+		if(pxSSEParamList->sPath){
 			if((nFd = fapi_Fileopen(pxSSEParamList->sPath, O_RDONLY,0))>0) {
 				if ((nRet=read(nFd, pxSSEParamList->pcBuf, MAX_SIZE))!= -1)
 					pxSSEParamList->len=nRet;
@@ -397,7 +397,7 @@ int fapi_ssFWrite(sse_param_t *pxSSEParamList)
 
 	/* if caller sends empty allocated buffer, it means read the content from the path*/
 	if (!pxSSEParamList->len) {
-		if(pxSSEParamList->sPath[0] != '\0'){
+		if(pxSSEParamList->sPath){
 			if((nFd = fapi_Fileopen(pxSSEParamList->sPath, O_RDONLY,0))>0) {
 				if ((nRet=read(nFd, pxSSEParamList->pcBuf, MAX_SIZE))!= -1){
 					pxSSEParamList->len=nRet;

@@ -94,6 +94,8 @@ enum flash_type {
 
 unsigned long sse_crc(unsigned long crc, char *sBuf, int bread);
 int readenv(void);
+/* UGW_SW-87803: This is a wrapper function called from fwupgrade daemon */
+int read_env(void);
 int envmatch(char *s1, int i2);
 /* Function to add a new variable and the value it takes */
 int addenv(char *name, char *val);

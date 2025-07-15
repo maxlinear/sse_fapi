@@ -1,6 +1,6 @@
 /*******************************************************************************
 
-  Copyright © 2020-2022 MaxLinear, Inc.
+  Copyright © 2020-2024 MaxLinear, Inc.
 
   For licensing information, see the file 'LICENSE' in the root folder of
   this software module.
@@ -28,9 +28,9 @@
 #include "fapi_sec_storage.h"
 #include <secure_services.h>
 
-#include "libsafec/safe_str_lib.h"
-#include "libsafec/safe_lib.h"
-#include "libsafec/safe_mem_lib.h"
+#include "safe_str_lib.h"
+#include "safe_lib.h"
+#include "safe_mem_lib.h"
 
 #define HEADER_SIZE     276
 #define DATA_FILE       "/opt/intel/csd/etc/datacfg"

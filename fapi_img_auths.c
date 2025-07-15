@@ -1,6 +1,6 @@
 /**************************************************************************
 
-  Copyright (C) 2022-2024 MaxLinear, Inc.
+  Copyright (C) 2022-2025 MaxLinear, Inc.
 
   For licensing information, see the file 'LICENSE' in the root folder of
   this software module.
@@ -37,6 +37,10 @@
 #include "safe_str_lib.h"
 #include "safe_lib.h"
 #include "safe_mem_lib.h"
+#ifdef LINUX_UPGRADE
+#include <sys/mman.h>
+#endif
+
 #if defined(IMG_AUTH) || defined(LINUX_UPGRADE)
 #define MAX_PATH_LEN 256
 #define MAX_BUFFER_LENGTH 256
@@ -58,6 +62,31 @@ static struct map_table map[] = {
 	{ "rootfs", "extended_boot", false },
 	{ "dtb", "dtb", false }
 };
+#define UDT_NEW_IMAGE 11
+#define UDT_IMAGE_RECOVERED 10
+#define UDT_IMAGE_NO_ACTION 0
+#define UPDATE_FILE  "/etc/scripts/upgrade_done.sh"
+#define RECOVERED_FILE "/etc/scripts/upgrade_recovered.sh"
+#define RBE 0x1
+#define BOOTLOADER 0x2
+#define TEP 0x4
+#define ROOTFS 0x8
+#define KERNEL 0x10
+#define DTB 0x20
+/* Supported image list for software upgrade */
+static const int image_list[] = {
+	RBE,
+	BOOTLOADER,
+	TEP,
+#if 0
+	ROOTFS,
+	KERNEL,
+	DTB,
+#endif
+	ROOTFS|KERNEL|DTB,
+	RBE|BOOTLOADER|TEP|ROOTFS|KERNEL|DTB
+};
+#define ARRAY_SIZE(arr) (int)(sizeof(arr) / sizeof((arr)[0]))
 #endif
 
 static unsigned char sState[][20] = {
@@ -87,7 +116,6 @@ static int is_image_hcrc_valid(image_header_t *hdr);
 #ifdef LINUX_UPGRADE
 #ifdef IMG_AUTH
 static int fapi_ssReadFromPartition(char *dev_path, char * type, long unsigned int len);
-static long unsigned int fapi_ssReadImageValue(char *image_name);
 #endif
 static char fapi_ssCheckActiveBank(void);
 static int fapi_ssMountLateboot(char *mnt_part, char *mnt_path);
@@ -108,7 +136,6 @@ extern int check_boardtype(void);
  */
 extern char *getDevFromPartition(char *name, char type);
 
-#ifdef IMG_AUTH
 
 /**====================================================================
  * @brief  image header CRC  check
@@ -134,6 +161,7 @@ static int is_image_hcrc_valid(image_header_t *hdr)
 	return (un_crc == ntohl(hdr->img_hdr_hcrc));
 }
 
+#ifdef IMG_AUTH
 /**=====================================================================
  * @brief  image data CRC  check
  *
@@ -209,8 +237,6 @@ static int fapi_ssImgValidate(img_param_t *pxImgParam, uint8_t upgradeOrCommit)
 			nRet = fapi_ssvalidateImg(nSecFd, img_ptr + sizeof(image_header_t), (auth_size - BLW_LENGTH), upgradeOrCommit);
 			if (nRet != UGW_SUCCESS)
 				goto failure;
-			pxImgParam->src_img_addr += sizeof(image_header_t);
-			pxImgParam->src_img_len -= sizeof(image_header_t);
 			LOGF_LOG_DEBUG("Rootfs Image Successfully authenticated.\n");
 			break;
 		case IMG_HDR_VAR_UBOOT:
@@ -245,8 +271,6 @@ static int fapi_ssImgValidate(img_param_t *pxImgParam, uint8_t upgradeOrCommit)
 			else {
 				nRet = fapi_ssvalidateImg(nSecFd, img_ptr + sizeof(image_header_t), (auth_size - BLW_LENGTH), upgradeOrCommit);
 			}
-			pxImgParam->src_img_addr += sizeof(image_header_t);
-			pxImgParam->src_img_len -= sizeof(image_header_t);
 			if (nRet != UGW_SUCCESS) {
 				LOGF_LOG_ERROR("firmware Image Authentication Failed!\n");
 				goto failure;
@@ -468,11 +492,11 @@ static int fapi_ssCopyImgBPtoBP(char *dev_path, char *image_type, int boardtype,
 	char name[MAX_PATH_LEN] = {0};
 	char *part_name;
 
-	fopen_s(&pFile, dev_path , "rb" );
-	if (pFile == NULL) {
-		LOGF_LOG_ERROR("File error"); 
+	if ((fopen_s(&pFile, dev_path, "rb") != EOK) || !pFile) {
+		LOGF_LOG_ERROR("file open failed - %s\n", strerror(errno));
 		return 1;
 	}
+
 	fseek(pFile, 0, SEEK_END);
 	lSize = (unsigned int)ftell (pFile);
 	fseek(pFile, 0, SEEK_SET);
@@ -493,7 +517,7 @@ static int fapi_ssCopyImgBPtoBP(char *dev_path, char *image_type, int boardtype,
 		part_name = getDevFromPartition(name, 'b');
 		memset(name, 0, sizeof(name));
 		sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
-	} else if (strcmp(image_type, "tep_firmware") == 0) {
+	} else if (strcmp(image_type, "tep") == 0) {
 		sprintf_s(name, sizeof(name), "tep_firmware_%c", (bank == 0 ? 'b': 'a'));
 		part_name = getDevFromPartition(name, 'b');
 		memset(name, 0, sizeof(name));
@@ -511,95 +535,6 @@ static int fapi_ssCopyImgBPtoBP(char *dev_path, char *image_type, int boardtype,
 	return fapi_ssWriteToPartition(buffer, lSize, name);
 }
 
-int fapi_ssImgCopyImgBPtoBP(char *image_type, int bp)
-{
-	int boardtype = 0, nRet = 0;
-	char name[MAX_PATH_LEN] = {0};
-	char *dev_path;
-	char *part_name;
-#ifdef IMG_AUTH
-	long unsigned int len;
-#endif
-
-	boardtype = check_boardtype();
-	if (strcmp(image_type, "early_boot") == 0) {
-		if (boardtype == FLASH_TYPE_EMMC) {
-			dev_path = fapi_ssGetParitionNameEMMC("uboot", (bp == 0 ? 'a' : 'b'));
-			if (dev_path == NULL) {
-				return UGW_FAILURE;
-			}
-#ifdef IMG_AUTH
-			len = fapi_ssReadImageValue(image_type);
-			if (len <= 0)
-				return 1;
-			nRet = fapi_ssReadFromPartition(dev_path, image_type, len);
-#endif
-			if (nRet == UGW_SUCCESS)
-				nRet = fapi_ssCopyImgBPtoBP(dev_path, image_type, boardtype, bp);
-			dev_path = fapi_ssGetParitionNameEMMC("tep_firmware", (bp == 0 ? 'a' : 'b'));
-			if (dev_path == NULL) {
-				return UGW_FAILURE;
-			}
-#ifdef IMG_AUTH
-			len = fapi_ssReadImageValue(image_type);
-			if (len <= 0)
-				return 1;
-			nRet = fapi_ssReadFromPartition(dev_path, image_type, len);
-#endif
-			if (nRet == UGW_SUCCESS)
-				nRet = fapi_ssCopyImgBPtoBP(dev_path, image_type, boardtype, bp);
-			sprintf_s(name, MAX_PATH_LEN, "/dev/mmcblk0boot%c", (bp == 0 ? '0' : '1'));
-#ifdef IMG_AUTH
-			len = fapi_ssReadImageValue(image_type);
-			if (len <= 0)
-				return 1;
-			nRet = fapi_ssReadFromPartition(name, image_type, len);
-#endif
-			if (nRet == UGW_SUCCESS)
-				nRet = fapi_ssCopyImgBPtoBP(name, image_type, boardtype, bp);
-		} else {
-			sprintf_s(name, sizeof(name), "uboot_%c", (bp == 0 ? 'a' : 'b'));
-			part_name = getDevFromPartition(name, 'b');
-			memset(name, 0, sizeof(name));
-			sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
-#ifdef IMG_AUTH
-			len = fapi_ssReadImageValue(image_type);
-			if (len <= 0)
-				return 1;
-			nRet = fapi_ssReadFromPartition(name, image_type, len);
-#endif
-			if (nRet == UGW_SUCCESS)
-				nRet = fapi_ssCopyImgBPtoBP(name, image_type, boardtype, bp);
-			memset(name, 0, sizeof(name));
-			sprintf_s(name, sizeof(name), "tep_firmware_%c", (bp == 0 ? 'a' : 'b'));
-			part_name = getDevFromPartition(name, 'b');
-			memset(name, 0, sizeof(name));
-			sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
-#ifdef IMG_AUTH
-			len = fapi_ssReadImageValue(image_type);
-			if (len <= 0)
-				return 1;
-			nRet = fapi_ssReadFromPartition(name, image_type, len);
-#endif
-			if (nRet == UGW_SUCCESS)
-				nRet = fapi_ssCopyImgBPtoBP(name, image_type, boardtype, bp);
-			memset(name, 0, sizeof(name));
-			sprintf_s(name, sizeof(name), "rbe_%c", (bp == 0 ? 'a' : 'b'));
-			part_name = getDevFromPartition(name, 'b');
-			memset(name, 0, sizeof(name));
-			sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
-#ifdef IMG_AUTH
-			len = fapi_ssReadImageValue(image_type);
-			if (len <= 0)
-				return 1;
-			nRet = fapi_ssReadFromPartition(name, image_type, len);
-#endif
-			if (nRet == UGW_SUCCESS)
-				nRet = fapi_ssCopyImgBPtoBP(name, image_type, boardtype, bp);
-		}
-	}
-	return nRet;
-}
 static char *fapi_ssGetParitionNameEMMC(char *image_type, char bank)
 {
 	char actbnk;
@@ -616,6 +551,8 @@ static char *fapi_ssGetParitionNameEMMC(char *image_type, char bank)
 		sprintf_s(name, sizeof(name), "extended_boot_%c", (actbnk == 'A' ? tolower('A'): tolower('B')));
 	else if (strcmp(image_type, "dtb") == 0)
 		sprintf_s(name, sizeof(name), "%s_%c", image_type, (actbnk == 'A' ? tolower('A'): tolower('B')));
+	else if (strcmp(image_type, "tep") == 0)
+		sprintf_s(name, sizeof(name), "tep_firmware_%c", bank);
 	else
 		sprintf_s(name, sizeof(name), "%s_%c", image_type, bank);
 	part_name = getDevFromPartition(name, 'b');
@@ -636,12 +573,13 @@ static char *fapi_ssGetParitionNameEMMC(char *image_type, char bank)
 
 	return file_path;
 }
-#ifdef IMG_AUTH
+
 static void fapi_ssUnmountEMMC(void)
 {
 	char actbnk;
 	char name[MAX_PATH_LEN] = {0};
 	char mnt_path[MAX_PATH_LEN] = {0};
+	int nRetValue, ret;
 
 	actbnk = fapi_ssCheckActiveBank();
 	sprintf_s(name, sizeof(name), "extended_boot_%c", (actbnk == 'A' ? tolower('A'): tolower('B')));
@@ -649,119 +587,141 @@ static void fapi_ssUnmountEMMC(void)
 	if (umount(mnt_path) < 0)
 		perror("umount error:");
 	LOGF_LOG_DEBUG("%s unmount done!\n", mnt_path);
+	sprintf_s(name, sizeof(name), "rm -rf %s\n", mnt_path);
+	ret = scapi_spawn(name, 1, &nRetValue);
+	if (ret == UGW_SUCCESS) {
+		LOGF_LOG_DEBUG("Deleted %s!\n", mnt_path);
+	} else {
+		perror("mount path delete error:");
+	}
 }
 
-
-int fapi_ssImgValidateAndCommit(void)
+int fapi_ssImgValidateAndCommit(char *image_type, int len)
 {
+#ifndef IMG_AUTH
+	(void)len;
+#endif
 	char actbnk;
 	char *part_name;
 	char name[MAX_PATH_LEN] = {0};
 	char *dev_path;
-	int boardtype = 0, nRet = 0;
-	long unsigned int len = 0;
-	char image_type[MAX_PATH_LEN];
+	int boardtype = 0, nRet = UGW_FAILURE, err, flag = 0;
 
 	boardtype = check_boardtype();
 	actbnk = fapi_ssCheckActiveBank();
 
-	sprintf_s(image_type, sizeof(image_type), "kernel");
-	len = fapi_ssReadImageValue(image_type);
-	if (len > 0) {
+	if (!(actbnk == 'A' || actbnk == 'B')) {
+		LOGF_LOG_ERROR("Invalid active_bank '%c'\n", actbnk);
+		return UGW_FAILURE;
+	}
+
+	err = strcmp_s(image_type, 6, "kernel", &nRet);
+	if ((err == EOK) && (nRet == 0)) {
+		flag = 1;
 		if (boardtype == FLASH_TYPE_EMMC) {
 			dev_path = fapi_ssGetParitionNameEMMC(image_type, actbnk);
 			if (dev_path == NULL) {
 				return UGW_FAILURE;
 			}
+#ifdef IMG_AUTH
 			nRet = fapi_ssReadFromPartition(dev_path, image_type, len);
+#endif
 			fapi_ssUnmountEMMC();
 		} else {
 			sprintf_s(name, sizeof(name), "kernel_%c", (actbnk == 'A' ? tolower('A'): tolower('B')));
 			part_name = getDevFromPartition(name, 'b');
 			memset(name, 0, sizeof(name));
 			sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
+#ifdef IMG_AUTH
 			nRet = fapi_ssReadFromPartition(name, image_type, len);
+#endif
 		}
 	}
-	if (nRet != UGW_SUCCESS)
+	if (flag == 1)
 		return nRet;
-
-	memset(image_type, 0, MAX_PATH_LEN);
-	sprintf_s(image_type, sizeof(image_type), "rootfs");
-	len = fapi_ssReadImageValue(image_type);
-	if (len > 0) {
+	err = strcmp_s(image_type, 6, "rootfs", &nRet);
+	if ((err == EOK) && (nRet == 0)) {
+		flag = 1;
 		if (boardtype == FLASH_TYPE_EMMC) {
 			dev_path = fapi_ssGetParitionNameEMMC(image_type, actbnk);
 			if (dev_path == NULL) {
 				return UGW_FAILURE;
 			}
+#ifdef IMG_AUTH
 			nRet = fapi_ssReadFromPartition(dev_path, image_type, len);
+#endif
 			fapi_ssUnmountEMMC();
 		} else {
 			sprintf_s(name, sizeof(name), "rootfs_%c", (actbnk == 'A' ? tolower('A'): tolower('B')));
 			part_name = getDevFromPartition(name, 'b');
 			memset(name, 0, sizeof(name));
 			sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
+#ifdef IMG_AUTH
 			nRet = fapi_ssReadFromPartition(name, image_type, len);
+#endif
 		}
 	}
-	if (nRet != UGW_SUCCESS)
+	if (flag == 1)
 		return nRet;
-
-	memset(image_type, 0, MAX_PATH_LEN);
-	sprintf_s(image_type, sizeof(image_type), "uboot");
-	len = fapi_ssReadImageValue(image_type);
-	if (len > 0) {
+	err = strcmp_s(image_type, 5, "uboot", &nRet);
+	if ((err == EOK) && (nRet == 0)) {
+		flag = 1;
 		if (boardtype == FLASH_TYPE_EMMC) {
 			dev_path = fapi_ssGetParitionNameEMMC(image_type, 'a');
 			if (dev_path == NULL) {
 				return UGW_FAILURE;
 			}
+#ifdef IMG_AUTH
 			nRet = fapi_ssReadFromPartition(dev_path, image_type, len);
 			if (nRet == UGW_SUCCESS)
+#endif
 				nRet = fapi_ssCopyImgBPtoBP(dev_path, image_type, boardtype, 0);
 		} else {
 			sprintf_s(name, sizeof(name), "uboot_a");
 			part_name = getDevFromPartition(name, 'b');
 			memset(name, 0, sizeof(name));
 			sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
+#ifdef IMG_AUTH
 			nRet = fapi_ssReadFromPartition(name, image_type, len);
 			if (nRet == UGW_SUCCESS)
+#endif
 				nRet = fapi_ssCopyImgBPtoBP(name, image_type, boardtype, 0);
 		}
 	}
-	if (nRet != UGW_SUCCESS)
-		return nRet;
 
-	memset(image_type, 0, MAX_PATH_LEN);
-	sprintf_s(image_type, sizeof(image_type), "firmware"); /* TEP firmware */
-	len = fapi_ssReadImageValue(image_type);
-	if (len > 0) {
+	if (flag == 1)
+		return nRet;
+	err = strcmp_s(image_type, 3, "tep", &nRet);
+	if ((err == EOK) && (nRet == 0)) {
+		flag = 1;
 		if (boardtype == FLASH_TYPE_EMMC) {
 			dev_path = fapi_ssGetParitionNameEMMC(image_type, 'a');
 			if (dev_path == NULL) {
 				return UGW_FAILURE;
 			}
+#ifdef IMG_AUTH
 			nRet = fapi_ssReadFromPartition(dev_path, image_type, len);
 			if (nRet == UGW_SUCCESS)
+#endif
 				nRet = fapi_ssCopyImgBPtoBP(dev_path, image_type, boardtype, 0);
 		} else {
 			sprintf_s(name, sizeof(name), "tep_firmware_a");
 			part_name = getDevFromPartition(name, 'b');
 			memset(name, 0, sizeof(name));
 			sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
+#ifdef IMG_AUTH
 			nRet = fapi_ssReadFromPartition(name, image_type, len);
 			if (nRet == UGW_SUCCESS)
+#endif
 				nRet = fapi_ssCopyImgBPtoBP(name, image_type, boardtype, 0);
 		}
 	}
-	if (nRet != UGW_SUCCESS)
-		return nRet;
 
-	memset(image_type, 0, MAX_PATH_LEN);
-	sprintf_s(image_type, sizeof(image_type), "rbe");
-	len = fapi_ssReadImageValue(image_type);
-	if (len > 0) {
+	if (flag == 1)
+		return nRet;
+	err = strcmp_s(image_type, 3, "rbe", &nRet);
+	if ((err == EOK) && (nRet == 0)) {
+		flag = 1;
 		if (boardtype == FLASH_TYPE_EMMC) {
 			sprintf_s(name, MAX_PATH_LEN, "/dev/mmcblk0boot0");
 		} else {
@@ -770,13 +730,14 @@ int fapi_ssImgValidateAndCommit(void)
 			memset(name, 0, sizeof(name));
 			sprintf_s(name, MAX_PATH_LEN, "/dev/%s", part_name);
 		}
+#ifdef IMG_AUTH
 		nRet = fapi_ssReadFromPartition(name, image_type, len);
 		if (nRet == UGW_SUCCESS)
+#endif
 			nRet = fapi_ssCopyImgBPtoBP(name, image_type, boardtype, 0);
 	}
 	return nRet;
 }
-#endif
 #endif
 
 /**=================================================================
@@ -933,64 +894,6 @@ finish:
 
 #ifdef LINUX_UPGRADE
 #ifdef IMG_AUTH
-static long unsigned int fapi_ssReadImageValue(char *image_name)
-{
-	FILE *fptr, *fileptr2;
-	char line[FILE_SIZE];
-	char *token, *ptr, *p;
-	char str[FILE_SIZE] = {'\0'};
-	char line1[MAX_PATH_LEN] = {0};
-	size_t len = MAX_PATH_LEN -1;
-	char delete_line[MAX_PATH_LEN] = {0};
-
-	fopen_s(&fptr, "/etc/.upgrade_info", "r");
-	if (fptr == NULL) {
-		/* Return 0 value indicating invalid length */
-		return 0;
-	}
-	while (fgets(line, FILE_SIZE, fptr)) {
-		strcat(str, line);
-	}
-	token = strtok(str, "=");
-	while (token != NULL) {
-		if (strstr(token, image_name)) {
-			ptr = strtok(NULL, "\n");
-			if (ptr == NULL) {
-				LOGF_LOG_DEBUG("string not found!!!\n");
-				fclose(fptr);
-				return -1;
-			}
-			LOGF_LOG_DEBUG("string found!!! %s\n", ptr);
-			rewind(fptr);
-			fopen_s(&fileptr2, "/etc/replica.txt", "w");
-			if (fileptr2 == NULL) {
-				fclose(fptr);
-				return -1;
-			}
-			sprintf_s(delete_line, sizeof(delete_line), "%s=%ld\n", image_name, strtoul(ptr,&p, 10));
-			while (fgets(line1, len, fptr)) {
-				if (strcmp(line1, delete_line) != 0)
-					fprintf(fileptr2, "%s", line1);
-			}
-			fseek(fileptr2, 0, SEEK_END);
-			if (ftell(fileptr2) != 0) {
-				fclose(fptr);
-				fclose(fileptr2);
-				remove("/etc/.upgrade_info");
-				rename("/etc/replica.txt", "/etc/.upgrade_info");
-			} else {
-				fclose(fptr);
-				fclose(fileptr2);
-				remove("/etc/.upgrade_info");
-				remove("/etc/replica.txt");
-			}
-			return strtoul(ptr,&p, 10 );
-		}
-		token = strtok(NULL, "=");
-	}
-	fclose(fptr);
-	return 0;
-}
 static int fapi_ssReadFromPartition(char *dev_path, char* type, long unsigned int len)
 {
 	FILE *pFile;
@@ -1001,10 +904,9 @@ static int fapi_ssReadFromPartition(char *dev_path, char* type, long unsigned in
 	image_header_t x_img_header;
 	uint32_t auth_size = 0;
 
-	fopen_s(&pFile, dev_path , "rb" );
-	if (pFile == NULL) {
-		LOGF_LOG_ERROR("File error"); 
-		return 1;
+	if ((fopen_s(&pFile, dev_path, "rb") != EOK) || !pFile) {
+		LOGF_LOG_ERROR("File open failed - %s\n", strerror(errno));
+		return UGW_FAILURE;
 	}
 	fseek (pFile, 0, SEEK_END);
 	lSize = (unsigned int)ftell (pFile);
@@ -1020,13 +922,12 @@ static int fapi_ssReadFromPartition(char *dev_path, char* type, long unsigned in
 	}
 
 	buffer = (char*) malloc (lSize);
-
 	if (buffer == NULL) {
 		fputs ("Memory error",stderr);
 		close(nSecFd);
 		if (pFile != NULL)
 			fclose(pFile);
-		return 2;
+		return UGW_FAILURE;
 	}
 	boardtype = check_boardtype();
 
@@ -1081,8 +982,8 @@ static int fapi_ssReadFromPartition(char *dev_path, char* type, long unsigned in
 #endif
 static int fapi_ssWriteToPartition(const unsigned char *image_src_address, int image_len, char *dev_path)
 {
-	int flag = 0;
 	FILE *fp1 = NULL;
+	int flag = 0;
 
 	if (strncmp(dev_path, "/dev/mmcblk0boot0", MAX_PATH_LEN) == 0)
 		system("/bin/echo 0 > /sys/block/mmcblk0boot0/force_ro");
@@ -1110,8 +1011,9 @@ static int fapi_ssWriteToPartition(const unsigned char *image_src_address, int i
 		system("/bin/echo 1 > /sys/block/mmcblk0boot0/force_ro");
 	else if	(strncmp(dev_path, "/dev/mmcblk0boot1", MAX_PATH_LEN) == 0)
 		system("/bin/echo 1 > /sys/block/mmcblk0boot1/force_ro");
-	return 0;
+	return UGW_SUCCESS;
 }
+
 static int fapi_ssMountLateboot(char *mnt_part, char *mnt_path)
 {
 	char param[MAX_PATH_LEN] = {0};
@@ -1121,9 +1023,14 @@ static int fapi_ssMountLateboot(char *mnt_part, char *mnt_path)
 	sprintf_s(param, sizeof(param), "mkdir -p %s\n", mnt_path);
 	ret = scapi_spawn(param, 1, &nRetValue);
 
-	if (ret == 0) {
+	if (ret == UGW_SUCCESS) {
 		sprintf_s(param, sizeof(param), "mount -t ext4 %s %s/\n", mnt_part, mnt_path);
-		return scapi_spawn(param, 1, &nRetValue);
+		ret = scapi_spawn(param, 1, &nRetValue);
+		if (nRetValue != UGW_SUCCESS){
+			sprintf_s(param, sizeof(param), "resize2fs %s && mount -t ext4 %s %s/\n", mnt_part, mnt_part, mnt_path);
+			printf("\ntrying resize2fs and mount again : %s\n",param);
+			return scapi_spawn(param, 1, &nRetValue);
+		}
 	}
 	return ret;
 }
@@ -1136,7 +1043,7 @@ static char fapi_ssCheckActiveBank(void)
 	output = popen("uboot_env --get --name active_bank", "r");
 	if (output == NULL) {
 		LOGF_LOG_ERROR("Error launching the cmd to get active_bank the uboot environment\n");
-		return 0;
+		return UGW_SUCCESS;
 	}
 	if (fread(&sActBnk, 1, sizeof(sActBnk), output) > 0) {
 		pclose(output);
@@ -1144,9 +1051,10 @@ static char fapi_ssCheckActiveBank(void)
 	} else {
 		LOGF_LOG_ERROR("variable not found in uboot\n");
 		pclose(output);
-		return 0;
+		return UGW_SUCCESS;
 	}
 }
+
 static void fapi_ssGetFileNameFromUboot(char *file_name, char *cPath)
 {
 	FILE *output;
@@ -1176,13 +1084,118 @@ static void fapi_ssGetFileNameFromUboot(char *file_name, char *cPath)
 	}
 }
 
+static int fapi_ssCheckFileSize(img_param_t image_auth)
+{
+	int i = 0, nRet=UGW_FAILURE;
+	char actbnk;
+	char name[MAX_PATH_LEN] = {0};
+	char dev_path[MAX_PATH_LEN] = {0};
+	char *part_name = NULL;
+	int boardtype;
+	FILE *fp1 = NULL;
+	unsigned int lSize;
+	int noffset, depth = 0;
+	int len = 0;
+
+	actbnk = fapi_ssCheckActiveBank();
+	if (!(actbnk == 'A' || actbnk == 'B')) {
+		LOGF_LOG_ERROR("Invalid active_bank '%c'\n", actbnk);
+		nRet = UGW_FAILURE;
+		goto finish;
+	}
+
+	boardtype = check_boardtype();
+	if (boardtype < 0) {
+		LOGF_LOG_ERROR("invalid board type\n");
+		nRet = UGW_FAILURE;
+		goto finish;
+	}
+	for (i = 0; i < ARRAY_SIZE(map); i++) {
+		if (strncmp(image_auth.img_name, map[i].name, sizeof(image_auth.img_name)) != 0) 
+			continue;
+
+		memset(dev_path, 0, sizeof(dev_path));
+		if (map[i].early_boot == true) {
+			/* Early boot component always written in primary bank */
+			if ((strncmp(map[i].name, "rbe", sizeof(image_auth.img_name)) == 0) && (boardtype == FLASH_TYPE_EMMC))
+				sprintf_s(dev_path, sizeof(dev_path), "/dev/mmcblk0boot0");
+			else
+				sprintf_s(name, sizeof(name), "%s_a", map[i].part);
+		} else {
+			/* Late boot component always written in non-active bank */
+			if (boardtype == FLASH_TYPE_EMMC) {
+				sprintf_s(name, sizeof(name), "%s_%c", map[i].part, (actbnk == 'A' ? tolower('B'): tolower('A')));
+			} else {
+				/* for NAND model partition name like roofs_*, kernel_* and dtb_* */
+				if (strncmp(image_auth.img_name, "rootfs", sizeof(image_auth.img_name)) == 0)
+					sprintf_s(name, sizeof(name), "rootfs_%c", (actbnk == 'A' ? tolower('B'): tolower('A')));
+				else if (strncmp(image_auth.img_name, "kernel", sizeof(image_auth.img_name)) == 0)
+					sprintf_s(name, sizeof(name), "kernel_%c", (actbnk == 'A' ? tolower('B'): tolower('A')));
+				else
+					sprintf_s(name, sizeof(name), "%s_%c", map[i].part, (actbnk == 'A' ? tolower('B'): tolower('A')));
+			}
+		}
+		if (dev_path[0] == '\0') {
+			part_name = getDevFromPartition(name, 'b');
+			sprintf_s(dev_path, sizeof(dev_path), "/dev/%s", part_name);
+		}
+		if ((fopen_s(&fp1, dev_path, "rb") != EOK) || !fp1) {
+			LOGF_LOG_ERROR("File error - %s\n", strerror(errno));
+			nRet = UGW_FAILURE;
+			goto finish;
+		}
+		fseek (fp1, 0, SEEK_END);
+		lSize = (unsigned int)ftell (fp1);
+		fseek(fp1, 0, SEEK_SET);
+		fclose(fp1);
+		if (strncmp(map[i].name, "dtb", sizeof(map[i].name)) != 0) { 
+			if ((unsigned int)image_auth.src_img_len > lSize) {
+				LOGF_LOG_ERROR("Given %s image length(%lu) is greater than partition lenth(%u)!\n", map[i].name, image_auth.src_img_len, lSize);
+				nRet = UGW_FAILURE;
+				goto finish;
+			} else {
+				LOGF_LOG_DEBUG("Given %s image size is less than partition!\n", map[i].name);
+				nRet = UGW_SUCCESS;
+			}
+		} else {
+			noffset = fdt_path_offset(image_auth.src_img_addr, FIT_IMAGES_PATH);
+			do {
+				noffset = fdt_next_node(image_auth.src_img_addr, noffset, &depth);
+				LOGF_LOG_DEBUG("noffset %d depth %d name %s\n", noffset, depth,
+					fdt_get_name(image_auth.src_img_addr, noffset, NULL));
+				if (depth == 1)
+					break;
+			} while (noffset >= 0);
+
+			if (noffset < 0) {
+				LOGF_LOG_ERROR("Unable to find dtb within fit image\n");
+				return UGW_FAILURE;
+			}
+
+			(void)fdt_getprop(image_auth.src_img_addr, noffset, FIT_DATA_PROP, &len);
+			if (!len) {
+				LOGF_LOG_ERROR("Unable to find dtb data\n");
+				return UGW_FAILURE;
+			}
+			if ((unsigned int)len > lSize) {
+				LOGF_LOG_ERROR("Given %s image length(%lu) is greater than partition lenth(%u)!\n", map[i].name, image_auth.src_img_len, lSize);
+				nRet = UGW_FAILURE;
+				goto finish;
+			} else {
+				LOGF_LOG_DEBUG("Given %s image size (%d) is less than partition size %u!\n", map[i].name, len, lSize);
+				return fdt_totalsize(image_auth.src_img_addr);
+			}
+		}
+	}
+finish:
+	return nRet;
+}
+
 static int fapi_ssWriteToDtbPartition(img_param_t image_auth, char *name)
 {
 	const void *data;
 	int noffset, depth = 0;
 	int len = 0, ret = 0;
-	FILE *fp1 = NULL;
-	unsigned int lSize;
 
 	noffset = fdt_path_offset(image_auth.src_img_addr, FIT_IMAGES_PATH);
 	do {
@@ -1203,20 +1216,6 @@ static int fapi_ssWriteToDtbPartition(img_param_t image_auth, char *name)
 		LOGF_LOG_ERROR("Unable to find dtb data\n");
 		return fdt_totalsize(image_auth.src_img_addr);
 	}
-	fopen_s(&fp1, name, "rb");
-	if (fp1 == NULL) {
-		LOGF_LOG_ERROR("File error"); 
-		return 1;
-	}
-	fseek (fp1, 0, SEEK_END);
-	lSize = (unsigned int)ftell (fp1);
-	fseek(fp1, 0, SEEK_SET);
-	fclose(fp1);
-
-	if ((unsigned int)len > lSize) {
-		LOGF_LOG_ERROR("Given dtb image length(%d) is greater than partition lenth(%ld)!\n", len, lSize);
-		return -1;
-	}
 	LOGF_LOG_DEBUG("dtb image dev_path: %s\n", name);
 	ret = fapi_ssWriteToPartition(data, len, name);
 	if (ret == UGW_SUCCESS)
@@ -1224,9 +1223,9 @@ static int fapi_ssWriteToDtbPartition(img_param_t image_auth, char *name)
 
 	return ret;
 }
-static int fapi_ssImgUpgrade(img_param_t image_auth)
+int fapi_ssImgUpgrade(img_param_t image_auth)
 {
-	int i = 0, nRet=UGW_FAILURE;
+	int i = 0, nRet = UGW_FAILURE;
 	char actbnk;
 	char name[MAX_PATH_LEN] = {0};
 	char dev_path[MAX_PATH_LEN] = {0};
@@ -1234,10 +1233,32 @@ static int fapi_ssImgUpgrade(img_param_t image_auth)
 	char *part_name = NULL;
 	char cPath[MAX_PATH_LEN] = {0};
 	int boardtype;
-	FILE *fp1 = NULL;
-	unsigned int lSize;
+	int nLockFd = -1, nRetValue;
 
+	nLockFd = fapi_Fileopen(LOCK_FILE, O_RDONLY, 0);
+	if (nLockFd < 0) {
+		LOGF_LOG_ERROR("LOCK FILE open failed [%s]\n", strerror(errno));
+		return UGW_FAILURE;
+	}
+
+	if (flock(nLockFd, LOCK_EX) < 0) {
+		LOGF_LOG_ERROR("flock failed with reason [%s]\n", strerror(errno));
+		if (close(nLockFd) < 0)
+			LOGF_LOG_DEBUG("close failed with reason [%s]\n", strerror(errno));
+		return UGW_FAILURE;
+	}
+
+	if (image_auth.src_img_fd < 0) {
+		LOGF_LOG_ERROR("image_auth.src_img_fd is less than 0\n");
+		nRet = ERR_BAD_FD;
+		goto finish;
+	}
 	actbnk = fapi_ssCheckActiveBank();
+	if (!(actbnk == 'A' || actbnk == 'B')) {
+		LOGF_LOG_ERROR("Invalid active_bank '%c'\n", actbnk);
+		nRet = UGW_FAILURE;
+		goto finish;
+	}
 	for (i = 0; i < ARRAY_SIZE(map); i++) {
 		if (strncmp(image_auth.img_name, map[i].name, sizeof(image_auth.img_name)) != 0) 
 			continue;
@@ -1268,22 +1289,6 @@ static int fapi_ssImgUpgrade(img_param_t image_auth)
 			part_name = getDevFromPartition(name, 'b');
 			sprintf_s(dev_path, sizeof(dev_path), "/dev/%s", part_name);
 		}
-		if (strncmp(map[i].name, "dtb", sizeof(map[i].name)) != 0) { 
-			fopen_s(&fp1, dev_path, "rb");
-			if (fp1 == NULL) {
-				LOGF_LOG_ERROR("File error"); 
-				return 1;
-			}
-			fseek (fp1, 0, SEEK_END);
-			lSize = (unsigned int)ftell (fp1);
-			fseek(fp1, 0, SEEK_SET);
-			fclose(fp1);
-
-			if ((unsigned int)image_auth.src_img_len > lSize) {
-				LOGF_LOG_ERROR("Given %s image length(%d) is greater than partition lenth(%ld)!\n", map[i].name, image_auth.src_img_len, lSize);
-				return UGW_FAILURE;
-			}
-		}
 		/* For EMMC rootfs and kernel mount is needed */
 		if (boardtype == FLASH_TYPE_EMMC) {
 			if ((strncmp(map[i].name, "rootfs", sizeof(map[i].name)) == 0) ||
@@ -1299,40 +1304,46 @@ static int fapi_ssImgUpgrade(img_param_t image_auth)
 				fapi_ssGetFileNameFromUboot(map[i].name, cPath);
 				if (cPath[0] == '\0') {
 					LOGF_LOG_ERROR("Error dev_path %s not valid for kernel!\n", mnt_path);
-					return UGW_FAILURE;
+					nRet = UGW_FAILURE;
+					goto finish;
 				}
 				sprintf_s(dev_path, sizeof(dev_path), "%s/%s", mnt_path, cPath);
 			}
 		}
 		if (strncmp(map[i].name, "dtb", sizeof(map[i].name)) == 0) {
-			return fapi_ssWriteToDtbPartition(image_auth, dev_path);
+			nRet = fapi_ssWriteToDtbPartition(image_auth, dev_path);
+			goto finish;
 		} else {
 			LOGF_LOG_DEBUG("image is :%s and dev_path: %s\n", map[i].name, dev_path);
 			nRet = fapi_ssWriteToPartition(image_auth.src_img_addr, image_auth.src_img_len, dev_path);
-#ifdef IMG_AUTH
-			if (nRet == 0) {
-				if (fopen_s(&fp1,"/etc/.upgrade_info" , "a") != EOK) {
-					LOGF_LOG_ERROR("Error %s!\n", strerror(errno));
-					return UGW_FAILURE;
-				}
-				if (fp1 == NULL) {
-					LOGF_LOG_ERROR("/etc/.upgrade_info file pointer is NULL!\n");
-					return UGW_FAILURE;
-				}
-				fprintf(fp1, "%s=%ld\n", map[i].name, image_auth.src_img_len);
-				fclose(fp1);
-			}
-#endif
 			if (boardtype == 1) {
 				if ((strncmp(map[i].name, "rootfs", sizeof(map[i].name)) == 0) ||
 					(strncmp(map[i].name, "kernel", sizeof(map[i].name)) == 0)) {
-					if (umount(mnt_path) < 0)
+					if (umount(mnt_path) < 0) {
 						perror("umount error:");
+					} else {
+						sprintf_s(name, sizeof(name), "rm -rf %s\n", mnt_path);
+						nRet = scapi_spawn(name, 1, &nRetValue);
+						if (nRet == UGW_SUCCESS) {
+							LOGF_LOG_DEBUG("Deleted %s!\n", mnt_path);
+						} else {
+							perror("mount path delete error:");
+						}
+					}
 				}
 			}
-			return nRet;
+			goto finish;
 		}
 	}
+finish:
+	if (flock(nLockFd, LOCK_UN) < 0)
+		LOGF_LOG_DEBUG("unlock failed with reason [%s]\n",
+		strerror(errno));
+
+	if (close(nLockFd) < 0)
+		LOGF_LOG_DEBUG("close failed with reason [%s]\n",
+		strerror(errno));
+
 	return nRet;
 }
 #else
@@ -1349,7 +1360,7 @@ int fapi_ssWriteToUpgPartition(img_param_t *pxImg)
 	FILE *fp1 = NULL, *fp2 = NULL;
 
 	/* Check for the filename */
-	if (!strnlen_s(pxImg->img_name, MAX_FILE_NAME)) {
+	if (!pxImg->img_name || !strnlen_s(pxImg->img_name, MAX_FILE_NAME)) {
 		LOGF_LOG_ERROR("File name is missing!\n");
 		return UGW_FAILURE;
 	}
@@ -1584,13 +1595,16 @@ int fapi_ssImgAuth(img_param_t image_auth)
 		nRet = fapi_ssImgValidate(&image_auth, 0);
 #endif
 		if (nRet == UGW_SUCCESS) {
+#ifdef LINUX_UPGRADE
+				nRet = fapi_ssCheckFileSize(image_auth);
+				if (nRet < 0) {
+					LOGF_LOG_ERROR("Image validation failed\n");
+					goto finish;
+				}
+#else
 			/* check if we need to write the imaeg to the upgrade partition*/
 			if (image_auth.write_to_upg_part) {
-#ifdef LINUX_UPGRADE
-				nRet = fapi_ssImgUpgrade(image_auth);
-#else
 				nRet = fapi_ssWriteToUpgPartition(&image_auth);
-#endif
 				if (nRet < 0) {
 					LOGF_LOG_ERROR("writing to upg partition failed\n");
 					nRet = IMAGE_WRITE_FAILED;
@@ -1601,6 +1615,7 @@ int fapi_ssImgAuth(img_param_t image_auth)
 				LOGF_LOG_ERROR("state variable success case update failed\n");
 				nRet = IMAGE_UPGSTATE_ERROR;
 			}
+#endif
 #ifndef LINUX_UPGRADE
 		} else{
 			if (fapi_ssSetUpgState(sState[UPG_FAIL]) ==
@@ -1642,7 +1657,7 @@ int fapi_ssGetActiveBank(unsigned char **pcState)
 	return UGW_SUCCESS;
 }
 
-int fapi_ssGetUbootParam(char *name, uboot_value_t *pcparam)
+int fapi_ssGetUbootParam(char *name, uboot_value_t *pcparam, bool env_valid)
 {
 	unsigned char *env_data = NULL;
 	int value, ret = 0;
@@ -1652,9 +1667,11 @@ int fapi_ssGetUbootParam(char *name, uboot_value_t *pcparam)
 		return UBOOT_VARIABLE_NOT_EXIST;
 	}
 
-	ret = readenv();
-	if (ret == GET_DEVICE_INFO_DATA_FAILURE)
-		return GET_DEVICE_INFO_DATA_FAILURE;
+	if (env_valid == false) {
+		ret = readenv();
+		if (ret == GET_DEVICE_INFO_DATA_FAILURE)
+			return GET_DEVICE_INFO_DATA_FAILURE;
+	}
 
 	env_data = get_env(name);
 	if (env_data == NULL) {
@@ -1696,7 +1713,6 @@ int fapi_ssSetUbootParam(char *name, uboot_value_t *pvalue)
 	if (pvalue->type == STRING) {
 		strncpy_s(value, sizeof(value),
 			  pvalue->u.valuec, strlen(pvalue->u.valuec));
-		printf("######lenght of the image is %s\n",value);
 		ret = set_env(name, value);
 		if (ret != UGW_SUCCESS)
 			return UBOOT_SET_OPERATION_FAIL;
@@ -1787,3 +1803,907 @@ int fapi_ssSetUdt(unsigned char *pvalue, uint32_t ivalue)
 	}
 	return UGW_SUCCESS;
 }
+
+#ifdef LINUX_UPGRADE
+static int add_uboot_param(const char *uboot_var, const int value)
+{
+	FILE *fp = NULL;
+	char cmd[MAX_PATH_LEN] = {0};
+
+	sprintf_s(cmd, sizeof(cmd), "/usr/sbin/uboot_env --get --name %s", uboot_var);
+	if (system(cmd) == 0)
+		return 0;
+	memset(cmd, 0, sizeof(cmd));
+	sprintf_s(cmd, sizeof(cmd), "/usr/sbin/uboot_env --add --name %s --value %d", uboot_var, value);
+	fp = popen(cmd, "w");
+	if (fp == NULL) {
+		fprintf(stderr, "Error launching the cmd to update the uboot environment\n");
+		return -ENOENT;
+	}
+	if (pclose(fp) < 0 ) {
+		fprintf(stderr, "Error setting the environement variable\n");
+		return -ENOENT;
+	}
+	return 0;
+}
+
+static int set_uboot_param_int(const char *var_name, const int value)
+{
+	FILE *fp = NULL;
+	char cmd[MAX_PATH_LEN] = {0};
+
+	sprintf_s(cmd, sizeof(cmd), "/usr/sbin/uboot_env --set --name %s --value %d", var_name, value);
+	fp = popen(cmd, "w");
+	if (fp == NULL) {
+		fprintf(stderr, "Error launching the cmd to update the uboot environment\n");
+		return -ENOENT;
+	}
+	if (pclose(fp) < 0 ) {
+		fprintf(stderr, "Error setting the environement variable\n");
+		return -ENOENT;
+	}
+	return 0;
+}
+
+static int set_uboot_param_str(const char *var_name, const char* value)
+{
+	FILE *fp = NULL;
+	char cmd[MAX_PATH_LEN] = {0};
+	sprintf_s(cmd, sizeof(cmd), "/usr/sbin/uboot_env --set --name %s --value %s", var_name, value);
+	fp = popen(cmd, "w");
+	if (fp == NULL) {
+		fprintf(stderr, "Error launching the cmd to update the uboot environment\n");
+		return -ENOENT;
+	}
+	if (pclose(fp) < 0 ) {
+		fprintf(stderr, "Error setting the environement variable\n");
+		return -ENOENT;
+	}
+	return 0;
+}
+
+static int get_uboot_param(char *var_name, char *value)
+{
+	FILE *output = NULL;
+	char name[MAX_PATH_LEN] = {0};
+	char cmd[MAX_PATH_LEN] = {0};
+
+	sprintf_s(cmd, sizeof(cmd), "/usr/sbin/uboot_env --get --name %s", var_name);
+	output = popen(cmd, "r");
+	if (output == NULL) {
+		fprintf(stderr, "Error launching the cmd to get %s the uboot environment\n", var_name);
+		return -ENOENT;
+	}
+	if (fread(name, 1, MAX_PATH_LEN, output) > 0) {
+		strncpy_s(value, MAX_PATH_LEN, name, MAX_PATH_LEN);
+		if (value[strnlen_s(name, MAX_PATH_LEN) - 1] == '\n')
+			value[strnlen_s(name, MAX_PATH_LEN) - 1] = 0;
+	} else {
+		fprintf(stderr, "%s variable not found in uboot\n", var_name);
+		return -ENOENT;
+	}
+
+	pclose(output);
+	return 0;
+}
+
+static int img_validate_and_commit(void)
+{
+	int i, ret = 0, val;
+	char cPath[MAX_PATH_LEN] = {0};
+
+	if (get_uboot_param("upgrade_image", cPath) != 0) {
+		fprintf(stderr, "Failed to get variable\n");
+		ret = -ENOENT;
+		goto finish;
+	}
+	val = atoi(cPath);
+	for (i = 0; i < ARRAY_SIZE(image_list); i++) {
+		if (image_list[i] != val) {
+			ret = -EINVAL;
+			continue;
+		} else {
+			if (val & BOOTLOADER) {
+				/* UBOOT */
+				ret = fapi_ssImgValidateAndCommit("uboot", 0);
+				if (ret != 0) {
+					ret = -EPERM;
+					goto finish;
+				}
+			}
+			if (val & RBE) {
+				/* RBE */
+				memset(cPath, 0, sizeof(cPath));
+				if (get_uboot_param("rbe_size", cPath) != 0) {
+					fprintf(stderr, "Failed to get variable\n");
+					ret = -ENOENT;
+					goto finish;
+				}
+				ret = fapi_ssImgValidateAndCommit("rbe", atoi(cPath));
+				if (ret != 0) {
+					ret = -EPERM;
+					goto finish;
+				}
+			}
+			if (val & TEP) {
+				/* TEP Firmware */
+				memset(cPath, 0, sizeof(cPath));
+				if (get_uboot_param("tep_size", cPath) != 0) {
+					fprintf(stderr, "Failed to get variable\n");
+					ret = -ENOENT;
+					goto finish;
+				}
+				ret = fapi_ssImgValidateAndCommit("tep", atoi(cPath));
+				if (ret != 0) {
+					ret = -EPERM;
+					goto finish;
+				}
+			}
+			if (val & KERNEL) {
+				/* kernel */
+#ifdef IMG_AUTH
+				ret = fapi_ssImgValidateAndCommit("kernel", 0);
+				if (ret != 0) {
+					ret = -EPERM;
+					goto finish;
+				}
+#else
+				ret = 0;
+#endif
+			}
+			if (val & ROOTFS) {
+				/* rootfs */
+#ifdef IMG_AUTH
+				memset(cPath, 0, sizeof(cPath));
+				if (get_uboot_param("rootfs_size", cPath) != 0) {
+					fprintf(stderr, "Failed to get variable\n");
+					ret = -ENOENT;
+					goto finish;
+				}
+				ret = fapi_ssImgValidateAndCommit("rootfs", atoi(cPath));
+				if (ret != 0)
+					ret = -EPERM;
+#else
+				ret = 0;
+#endif
+			}
+			if (val & DTB) {
+				fprintf(stderr, "DTB Image, nothing to be done\n");
+				ret = 0;
+			}
+			break;
+		}
+	}
+finish:
+	return ret;
+}
+
+
+/**=====================================================================
+ * @brief  API to switch activebank
+ *
+ * @param actbnk bank to switch
+ *
+ * @return
+ *  0 on success
+ *  error code on failure
+ =======================================================================
+ */
+int fapi_Switch_bank(char *actbnk)
+{
+	int nRet = 0;
+	if (!(strcmp(actbnk, "A") == 0 || strcmp(actbnk, "B") == 0)) {
+		LOGF_LOG_ERROR("Invalid active_bank '%s'\n", actbnk);
+		nRet = -EINVAL;
+	}
+	if (set_uboot_param_str("active_bank", actbnk) != 0) {
+		fprintf(stderr, "Failed to set active_bank\n");
+		nRet = -EPERM;
+	}
+	return nRet;
+}
+
+/**=====================================================================
+ * @brief  API to get last upgrade status
+ *
+ * @param value upgrade status  
+ *
+ * @return
+ *  0 on success
+ *  error code on failure
+ =======================================================================
+ */
+int fapi_Get_lastupg_status(char *value)
+{
+	char cPath[MAX_PATH_LEN] = {0};
+	if (get_uboot_param("last_upg_status", cPath) != 0) {
+		fprintf(stderr, "Failed to get variable\n");
+		return -ENOENT;
+	}
+	strncpy_s(value, MAX_PATH_LEN, cPath, MAX_PATH_LEN);
+	return 0;
+}
+
+/**=====================================================================
+ * @brief  API to get last upgrade time
+ *
+ * @param value upgrade time 
+ *
+ * @return
+ *  0 on success
+ *  error code on failure
+ =======================================================================
+ */
+int fapi_Get_lastupg_time(char *value)
+{
+	char cPath[MAX_PATH_LEN] = {0};
+	if (get_uboot_param("last_upg_time", cPath) != 0) {
+		fprintf(stderr, "Failed to get variable\n");
+		return -ENOENT;
+	}
+	strncpy_s(value, MAX_PATH_LEN, cPath, MAX_PATH_LEN);
+	return 0;
+}
+
+/**=====================================================================
+ * @brief  API to commit image
+ *
+ * @param void
+ *
+ * @return
+ *  0 on success
+ *  error code on failure
+ =======================================================================
+ */
+int fapi_Image_commit(void)
+{
+	int ret = 0, udt_status;
+	char cPath[MAX_PATH_LEN] = {0};
+	struct timespec ts;
+	struct tm *tm_info;
+	char date_string[MAX_PATH_LEN];
+
+	if (access("/tmp/.upg_progress", F_OK) == 0) {
+		fprintf(stderr, "upgrade in progress, do reboot before commit\n");
+		return -ECANCELED;
+	}
+
+	/*get date and time info*/
+	clock_gettime(CLOCK_REALTIME, &ts);
+	tm_info = localtime(&ts.tv_sec);
+	strftime(date_string, sizeof(date_string), "%Y%m%d%H%M%S", tm_info);
+	//fprintf(stderr,"Current date and time: %s\n", date_string);
+	
+	if (get_uboot_param("udt_status", cPath) != 0) {
+		fprintf(stderr, "Failed to get variable\n");
+		ret = -ENOENT;
+		goto finish;
+	}
+	/* check udt_status is UDT_UPG_LINUX_NEW_IMAGE or not */
+	udt_status = atoi(cPath);
+	if (udt_status != UDT_NEW_IMAGE) {
+		if (udt_status != UDT_IMAGE_RECOVERED) {
+			fprintf(stderr, "udt_status value not Recovered or New Image, commit failed\n");
+			return -ECANCELED;
+		} else {
+			fprintf(stdout, "A new S/W UPGRADE, in previous boot, failed and rejected." 
+					"The original version was RECOVERED\n");
+			if (set_uboot_param_str("last_upg_time", date_string) != 0) {
+				fprintf(stderr, "Failed to set last_upg_time'\n");
+				ret = -EPERM;
+			}
+			if (set_uboot_param_str("last_upg_status", "Failed") != 0) {
+				fprintf(stderr, "Failed to set 'last_upg_status' as 'Failed'\n");
+				ret = -EPERM;
+			}
+			if (set_uboot_param_int("rbe_size", 0) != 0) {
+				fprintf(stderr, "Failed to set 'rbe_size' to 0\n");
+				ret = -EPERM;
+			}
+			if (set_uboot_param_int("tep_size", 0) != 0) {
+				fprintf(stderr, "Failed to set 'tep_size' to 0\n");
+				ret = -EPERM;
+			}
+			if (set_uboot_param_int("rootfs_size", 0) != 0) {
+				fprintf(stderr, "Failed to set 'rootfs_size' to 0\n");
+				ret = -EPERM;
+			}
+			if (set_uboot_param_int("upgrade_image", 0) != 0) {
+				fprintf(stderr, "Failed to set 'upgrade_image' to 0\n");
+				ret = -EPERM;
+			}
+			if (set_uboot_param_str("early_boot", "valid") != 0) {
+				fprintf(stderr, "Failed to set 'early_boot' as 'valid'\n");
+				ret = -EPERM;
+			}
+			if (set_uboot_param_str("late_boot", "valid") != 0) {
+				fprintf(stderr, "Failed to set 'late_boot' as 'valid'\n");
+				ret = -EPERM;
+			}
+			if (set_uboot_param_int("udt_status", UDT_IMAGE_NO_ACTION) != 0) {
+				fprintf(stderr, "Fail to set 'udt_status' to zero\n");
+				ret = -EPERM;
+			}
+		}
+	} else {
+		
+		fprintf(stdout, 
+			"A new S/W UPGRADE, in previous boot, was detected and accepted."
+			"Now Commiting the image.\n");
+		if (set_uboot_param_str("last_upg_time", date_string) != 0) {
+			fprintf(stderr, "Failed to set last_upg_time'\n");
+			ret = -EPERM;
+		}
+		if (set_uboot_param_str("last_upg_status", "Success") != 0) {
+			fprintf(stderr, "Failed to set 'last_upg_status' as 'Failed'\n");
+			ret = -EPERM;
+		}
+		ret = img_validate_and_commit();
+		if (ret < 0) {
+			fprintf(stderr, "Image commit failed\n");
+			goto finish;
+		}
+		memset(cPath, 0, sizeof(cPath));
+		if (get_uboot_param("early_boot", cPath) != 0) {
+			fprintf(stderr, "Failed to get variable\n");
+			ret = -ENOENT;
+		}
+		if (strncmp(cPath, "upgrade", strlen("upgrade")) == 0 ) {
+			if (set_uboot_param_str("early_boot", "valid") != 0) {
+				fprintf(stderr, "Failed to set 'early_boot' to valid\n");
+				ret = -EPERM;
+				goto finish;
+			}
+			memset(cPath, 0, sizeof(cPath));
+			if (get_uboot_param("rbe_size", cPath) != 0) {
+				fprintf(stderr, "Failed to get variable\n");
+				ret = -ENOENT;
+			}
+			if (atoi(cPath) != 0)
+				if (set_uboot_param_int("rbe_size", 0) != 0) {
+					fprintf(stderr, "Failed to set 'rbe_size' to 0\n");
+					ret = -EPERM;
+					goto finish;
+				}
+			memset(cPath, 0, sizeof(cPath));
+			if (get_uboot_param("tep_size", cPath) != 0) {
+				fprintf(stderr, "Failed to get variable\n");
+				ret = -ENOENT;
+			}
+			if (atoi(cPath) != 0)
+				if (set_uboot_param_int("tep_size", 0) != 0) {
+					fprintf(stderr, "Failed to set 'tep_size' to 0\n");
+					ret = -EPERM;
+					goto finish;
+				}
+		}
+		memset(cPath, 0, sizeof(cPath));
+		if (get_uboot_param("late_boot", cPath) != 0) {
+			fprintf(stderr, "Failed to get variable\n");
+			ret = -ENOENT;
+		}
+		if (strncmp(cPath, "upgrade", strlen("upgrade")) == 0 ) {
+			if (set_uboot_param_str("late_boot", "valid") != 0) {
+				fprintf(stderr, "Setting the late_boot value Failed as valid\n");
+				ret = -EPERM;
+				goto finish;
+			}
+			memset(cPath, 0, sizeof(cPath));
+			if (get_uboot_param("rootfs_size", cPath) != 0) {
+				fprintf(stderr, "Failed to get variable\n");
+				ret = -ENOENT;
+			}
+			if (atoi(cPath) != 0)
+				if (set_uboot_param_int("rootfs_size", 0) != 0) {
+					fprintf(stderr, "Failed to set 'rootfs_size' to 0\n");
+					ret = -EPERM;
+					goto finish;
+				}
+		}
+		memset(cPath, 0, sizeof(cPath));
+		if (get_uboot_param("upgrade_image", cPath) != 0) {
+			fprintf(stderr, "Failed to get variable\n");
+			ret = -ENOENT;
+		}
+		if (atoi(cPath) != 0)
+			if (set_uboot_param_int("upgrade_image", 0) != 0) {
+				fprintf(stderr, "Failed to set 'upgrade_image' to 0\n");
+				ret = -EPERM;
+				goto finish;
+			}
+		if (set_uboot_param_int("udt_status", UDT_IMAGE_NO_ACTION) != 0) {
+			fprintf(stderr, "Fail to set 'udt_status' to zero\n");
+			ret = -EPERM;
+			goto finish;
+		}
+	}
+finish:
+	return ret;
+}
+
+static int image_hdr_validation(image_header_t *pxImgHeader)
+{
+	/* if mkimage header is not available, exit */
+	if (pxImgHeader) {
+		switch (ntohl(pxImgHeader->img_hdr_magic)) {
+			case IMG_HDR_MAGIC:
+				if (!is_image_hcrc_valid(pxImgHeader)) {
+					fprintf(stderr, "Bad Header Checksum\n");
+					return -EINVAL;
+				}
+				fprintf(stdout, "Successful validation of image header and checksum\n");
+				break;
+			case FLATDT_MAGIC:
+				/* DTB crc is not available, so not added checking for it */
+				break;
+			default:
+				fprintf(stderr, "no mkimage header\n");
+				return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static int validate_image(const img_param_t img)
+{
+	uint32_t cur_par_size=0, pad, file_read_size =0, total_file_read_size = 0;
+	unsigned char *header = NULL;
+	image_header_t x_img_header, *img_header = NULL;
+	char name[MAX_PATH_LEN] = {0};
+	int ret = 0, i, fullimage = 0, currentimage = 0;
+	img_param_t img_param;
+
+	header = img.src_img_addr;
+	do {
+		x_img_header = *((image_header_t *)header);
+
+		if(x_img_header.img_hdr_type == IMG_HDR_VAR_MULTI) {
+			img_header = &x_img_header;
+			if (image_hdr_validation(img_header) < 0) {
+				ret = -EINVAL;
+				goto finish;
+			}
+			fullimage = 1;
+			cur_par_size = sizeof(image_header_t) + 8;
+			total_file_read_size += cur_par_size;
+			header = img.src_img_addr + total_file_read_size;
+			continue;
+		}
+
+		cur_par_size = sizeof(image_header_t) + ntohl(x_img_header.img_hdr_size);
+		pad = (16 - (cur_par_size % 16)) % 16;
+		header = img.src_img_addr + total_file_read_size;
+		file_read_size = cur_par_size + pad;
+
+		img_header = &x_img_header;
+		if (image_hdr_validation(img_header) < 0) {
+			ret = -EINVAL;
+			goto finish;
+		}
+		if (ntohl(*(uint32_t *)header) == FLATDT_MAGIC) {
+			if (fullimage != 1) {
+				fprintf(stderr, "Only DTB image upgrade not supported!\n");
+				ret = -EINVAL;
+				goto finish;
+			}
+			currentimage |= DTB;
+			memcpy(&img_param, &img, sizeof(img));
+			strncpy_s(img_param.img_name, sizeof(img_param.img_name), "dtb", strlen("dtb"));
+			img_param.src_img_addr = header;
+			ret = fapi_ssImgAuth(img_param);
+			if (ret < 0) {
+				fprintf(stderr, "%s Image Validation failed\n", img_param.img_name);
+				ret = -EPERM;
+				goto finish;
+			}
+			file_read_size = ret;
+			header += sizeof(image_header_t);
+			ret = 0;
+			goto dtb_finish;
+		}
+
+		switch(x_img_header.img_hdr_type) {
+			case IMG_HDR_VAR_FILESYSTEM:
+				if (fullimage != 1) {
+					fprintf(stderr, "Only Rootfs image upgrade not supported!\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+				currentimage |= ROOTFS;
+				sprintf_s(name, sizeof(name),"rootfs");
+				break;
+			case IMG_HDR_VAR_KERNEL:
+				if (fullimage != 1) {
+					fprintf(stderr, "Only kernel image upgrade not supported!\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+				currentimage |= KERNEL;
+				sprintf_s(name, sizeof(name),"kernel");
+				break;
+			case IMG_HDR_VAR_FIRMWARE:
+				if (strncmp((char *)x_img_header.img_hdr_name, "RBE", sizeof(x_img_header.img_hdr_name)) == 0) {
+					sprintf_s(name, sizeof(name), "rbe");
+					currentimage |= RBE;
+				} else if (strncmp((char *)x_img_header.img_hdr_name, "TEP firmware", sizeof(x_img_header.img_hdr_name)) == 0) {
+					sprintf_s(name, sizeof(name),"firmware");
+					currentimage |= TEP;
+				} else {
+					fprintf(stderr, "Unknown image type, not a RBE or TEP!!\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+				break;
+			case IMG_HDR_VAR_UBOOT:
+				sprintf_s(name, sizeof(name), "uboot");
+				currentimage |= BOOTLOADER;
+				break;
+			default:
+				fprintf(stderr, "Unknown image type!!\n");
+				ret = -EINVAL;
+				goto finish;
+		}
+		memcpy(&img_param, &img, sizeof(img));
+		strncpy_s(img_param.img_name, MAX_PATH_LEN, name, MAX_PATH_LEN);
+
+		img_param.src_img_addr = header;
+		if ((x_img_header.img_hdr_type != IMG_HDR_VAR_KERNEL) &&
+			(x_img_header.img_hdr_type != IMG_HDR_VAR_UBOOT))
+			img_param.src_img_len = file_read_size - pad - sizeof(image_header_t);
+		else
+			img_param.src_img_len = file_read_size - pad;
+
+		ret = fapi_ssImgAuth(img_param);
+		if (ret != 0) {
+			fprintf(stderr, "%s Image validation failed\n", img_param.img_name);
+			ret = -EPERM;
+			goto finish;
+		}
+dtb_finish:
+		total_file_read_size += file_read_size;
+
+		if ((x_img_header.img_hdr_type != IMG_HDR_VAR_KERNEL) &&
+			(x_img_header.img_hdr_type != IMG_HDR_VAR_UBOOT))
+			header += cur_par_size;
+		else
+			header += file_read_size;
+	} while (img.src_img_len > total_file_read_size);
+
+	for (i = 0; i < ARRAY_SIZE(image_list); i++) {
+		if (image_list[i] != currentimage) {
+			ret = -EINVAL;
+			continue;
+		}
+		
+		ret = set_uboot_param_int("upgrade_image", currentimage);
+		if (ret < 0) {
+			fprintf(stderr, "Setting the upgrade_image value Failed\n");
+			ret = -EINVAL;
+			goto finish;
+		}
+		break;
+	}
+
+finish:
+	return ret;
+}
+
+static int upgrade_image(const img_param_t img)
+{
+	uint32_t cur_par_size=0, pad, file_read_size =0, total_file_read_size = 0;
+	unsigned char *header = NULL;
+	image_header_t x_img_header;
+	char name[MAX_PATH_LEN] = {0}, early_boot[MAX_PATH_LEN] = {0}, late_boot[MAX_PATH_LEN] = {0};
+	char cPath[MAX_PATH_LEN] = {0};
+	int ret = 0, fullimage = 0;
+	img_param_t img_param;
+
+	header = img.src_img_addr;
+	do {
+		x_img_header = *((image_header_t *)header);
+
+		if(x_img_header.img_hdr_type == IMG_HDR_VAR_MULTI) {
+			fullimage = 1;
+			cur_par_size = sizeof(image_header_t) + 8;
+			total_file_read_size += cur_par_size;
+			header =  img.src_img_addr + total_file_read_size;
+			continue;
+		}
+
+		cur_par_size = sizeof(image_header_t) + ntohl(x_img_header.img_hdr_size);
+		pad = (16 - (cur_par_size % 16)) % 16;
+		header =  img.src_img_addr + total_file_read_size;
+		file_read_size = cur_par_size + pad;
+
+		if (ntohl(*(uint32_t *)header) == FLATDT_MAGIC) {
+			if (fullimage != 1) {
+				fprintf(stderr, "Only DTB image upgrade not supported!\n");
+				ret = -EINVAL;
+				goto finish;
+			}
+			memcpy(&img_param, &img, sizeof(img));
+			strncpy_s(img_param.img_name, sizeof(img_param.img_name), "dtb", strlen("dtb"));
+			img_param.src_img_addr = header;
+			ret = fapi_ssImgUpgrade(img_param);
+			if (ret < 0) {
+				fprintf(stderr, "%s Image upgrade failed\n", img_param.img_name);
+				ret = -EINVAL;
+				goto finish;
+			}
+			sprintf_s(late_boot, sizeof(name), "late_boot");
+			file_read_size = ret;
+			header += sizeof(image_header_t);
+			ret = 0;
+			goto dtb_finish;
+		}
+
+		switch(x_img_header.img_hdr_type) {
+			case IMG_HDR_VAR_FILESYSTEM:
+				if (fullimage != 1) {
+					fprintf(stderr, "Only Rootfs image upgrade not supported!\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+				sprintf_s(name, sizeof(name),"rootfs");
+				sprintf_s(late_boot, sizeof(name), "late_boot");
+				break;
+			case IMG_HDR_VAR_KERNEL:
+				if (fullimage != 1) {
+					fprintf(stderr, "Only kernel image upgrade not supported!\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+				sprintf_s(name, sizeof(name),"kernel");
+				sprintf_s(late_boot, sizeof(name), "late_boot");
+				break;
+			case IMG_HDR_VAR_FIRMWARE:
+				if (strncmp((char *)x_img_header.img_hdr_name, "RBE", sizeof(x_img_header.img_hdr_name)) == 0)
+					sprintf_s(name, sizeof(name), "rbe");
+				else if (strncmp((char *)x_img_header.img_hdr_name, "TEP firmware", sizeof(x_img_header.img_hdr_name)) == 0)
+					sprintf_s(name, sizeof(name),"firmware");
+				else {
+					fprintf(stderr, "Unknown image type, not a RBE or TEP!!\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+				sprintf_s(early_boot, sizeof(name), "early_boot");
+				break;
+			case IMG_HDR_VAR_UBOOT:
+				sprintf_s(name, sizeof(name), "uboot");
+				sprintf_s(early_boot, sizeof(name), "early_boot");
+				break;
+			default:
+				fprintf(stderr, "Unknown image type!!\n");
+				ret = -EINVAL;
+				goto finish;
+		}
+		memcpy(&img_param, &img, sizeof(img));
+		strncpy_s(img_param.img_name, MAX_PATH_LEN, name, MAX_PATH_LEN);
+
+		if (ntohl(x_img_header.img_hdr_magic) == IMG_HDR_MAGIC) {
+			fprintf(stdout, "Image contains header with name [%s]\n",x_img_header.img_hdr_name);
+			if ((x_img_header.img_hdr_type != IMG_HDR_VAR_KERNEL) &&
+				(x_img_header.img_hdr_type != IMG_HDR_VAR_UBOOT)) {
+				fprintf(stdout, "This is not kernel or uboot image and so removing header\n");
+				header += sizeof(image_header_t);
+				cur_par_size -= sizeof(image_header_t);
+			}
+		}
+
+		img_param.src_img_addr = header;
+		if ((x_img_header.img_hdr_type != IMG_HDR_VAR_KERNEL) &&
+			(x_img_header.img_hdr_type != IMG_HDR_VAR_UBOOT))
+			img_param.src_img_len = file_read_size - pad - sizeof(image_header_t);
+		else
+			img_param.src_img_len = file_read_size - pad;
+
+		ret = fapi_ssImgUpgrade(img_param);
+		if (ret == 0) {
+			if (x_img_header.img_hdr_type == IMG_HDR_VAR_FILESYSTEM) {
+				if (set_uboot_param_int("filesystem_size", img_param.src_img_len) != 0) {
+					fprintf(stderr, "Setting the filesystem_size value Failed\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+				if (set_uboot_param_int("rootfs_size", img_param.src_img_len) != 0) {
+					fprintf(stderr, "Setting the rootfs_size value Failed\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+			} else if (strncmp((char *)x_img_header.img_hdr_name, "RBE", sizeof(x_img_header.img_hdr_name)) == 0) {
+				if (set_uboot_param_int("rbe_size", img_param.src_img_len) != 0) {
+					fprintf(stderr, "Setting the rbe_size value Failed\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+			} else if (strncmp((char *)x_img_header.img_hdr_name, "TEP firmware", sizeof(x_img_header.img_hdr_name)) == 0) {
+				if (set_uboot_param_int("tep_size", img_param.src_img_len) != 0) {
+					fprintf(stderr, "Setting the tep_size value Failed\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+			}
+		} else {
+			fprintf(stderr, "%s Image Upgrade failed\n", img_param.img_name);
+			ret = -EINVAL;
+			goto finish;
+		}
+dtb_finish:
+		total_file_read_size += file_read_size;
+
+		if ((x_img_header.img_hdr_type != IMG_HDR_VAR_KERNEL) &&
+			(x_img_header.img_hdr_type != IMG_HDR_VAR_UBOOT))
+			header += cur_par_size;
+		else
+			header += file_read_size;
+	} while (img.src_img_len > total_file_read_size);
+
+	if (ret == 0) {
+		if (strncmp(early_boot, "early_boot", strlen("early_boot")) == 0) {
+			if (set_uboot_param_str("early_boot", "upgrade") != 0) {
+				fprintf(stderr, "Setting the early boot status Failed\n");
+				ret = -EINVAL;
+				goto finish;
+			}
+		}
+		if (strncmp(late_boot, "late_boot", strlen("late_boot")) == 0) {
+			memset(cPath, 0, sizeof(cPath));
+			if (get_uboot_param("active_bank", cPath) != 0) {
+				fprintf(stderr, "Failed to get variable\n");
+				ret = -ENOENT;
+				goto finish;
+			}
+			if (cPath[0] == 'A')
+				ret = set_uboot_param_str("active_bank", "B");
+			else if (cPath[0] == 'B')
+				ret = set_uboot_param_str("active_bank", "A");
+			else
+				ret = -EINVAL;
+			if (ret != 0) {
+				fprintf(stderr, "Toggle active bank Failed\n");
+				ret = -EINVAL;
+				goto finish;
+			}
+			if (set_uboot_param_str("late_boot", "upgrade") != 0) {
+				fprintf(stderr, "Setting the late boot status Failed\n");
+				ret = -EINVAL;
+				goto finish;
+			}
+		}
+	}
+finish:
+	return ret;
+}
+
+/**=====================================================================
+ * @brief  image upgrade from linux
+ *
+ * @param path
+ * image path to be updated
+ *
+ * @return
+ *  0 on success
+ *  error code on failure
+ =======================================================================
+ */
+int fapi_Image_upgrade(const char *path)
+{
+	int ret = 0, val = 0, file_fd = 0, flag = 0;
+	struct stat filestat = {0};
+	img_param_t img, img_param;
+	char cPath[MAX_PATH_LEN] = {0};
+	
+	if (get_uboot_param("udt_status", cPath) != 0) {
+		fprintf(stderr, "Failed to get variable\n");
+		ret = -ENOENT;
+		goto finish;
+	}
+	if (atoi(cPath) != UDT_IMAGE_NO_ACTION) {
+		fprintf(stderr, "Previous Upgrade not completed yet as udt_status is %d!!!\n", atoi(cPath));
+		ret = -ECANCELED;
+		goto finish;
+	}
+	file_fd = open(path, O_RDONLY);
+	if (file_fd < 0) {
+		fprintf(stderr, "The file %s could not be opened\n", path);
+		ret = -ENOENT;
+		goto finish;
+	}
+
+	if (fstat(file_fd, &filestat)) {
+		fprintf(stderr, "fstat error: [%s]\n",strerror(errno));
+		close(file_fd);
+		ret = -ENOENT;
+		goto finish;
+	}
+
+	img.src_img_fd=file_fd;
+	img.src_img_len=filestat.st_size;
+	if (!img.src_img_len) {
+		fprintf(stderr, "Empty File...\n");
+		ret = -ENOENT;
+		goto finish;
+	} else {
+		img.src_img_addr = mmap(0, img.src_img_len, PROT_READ, MAP_SHARED, img.src_img_fd, 0);
+		if(img.src_img_addr == MAP_FAILED) {
+			fprintf(stderr, "MMAP failed... %s\n",strerror(errno));
+			ret = -ENOENT;
+			goto finish;
+		}
+		flag = 1;
+	}
+	ret = add_uboot_param("upgrade_image", 0);
+	if (ret < 0) {
+		fprintf(stderr, "upgrade_image value addition Failed\n");
+		goto finish;
+	}
+
+	memcpy(&img_param, &img, sizeof(img));
+	ret = validate_image(img_param);
+	if (ret < 0) {
+		fprintf(stderr, "Image validation failed");
+		goto finish;
+	}
+	fprintf(stdout, "Image validation passed \n");
+	if (set_uboot_param_int("udt_status", UDT_NEW_IMAGE) != 0) {
+		fprintf(stderr, "Setting the udt status Failed\n");
+		ret = -EPERM;
+		goto finish;
+	}
+	memset(cPath, 0, sizeof(cPath));
+	if (get_uboot_param("upgrade_image", cPath) != 0) {
+		fprintf(stderr, "Failed to get variable\n");
+		ret = -ENOENT;
+		goto finish;
+	}
+	val = atoi(cPath);
+
+	if (((val & BOOTLOADER) == BOOTLOADER) ||
+		((val & RBE) == RBE) || ((val & TEP) == TEP)) {
+		if (set_uboot_param_str("early_boot", "invalid") != 0) {
+			fprintf(stderr, "Setting the early boot status Failed\n");
+			ret = -EPERM;
+			goto finish;
+		}
+		if (val & TEP) {
+			ret = add_uboot_param("tep_size", 0);
+			if (ret < 0) {
+				fprintf(stderr, "tep_size value addition Failed\n");
+				goto finish;
+			}
+		}
+		if (val & RBE) {
+			ret = add_uboot_param("rbe_size", 0);
+			if (ret < 0) {
+				fprintf(stderr, "rbe_size value addition Failed\n");
+				goto finish;
+			}
+		}
+	}
+	if (((val & KERNEL) == KERNEL) || ((val & ROOTFS) == ROOTFS) || ((val & DTB) == DTB)) {
+		if (set_uboot_param_str("late_boot", "invalid") != 0) {
+			fprintf(stderr, "Setting the late boot status Failed\n");
+			ret = -EPERM;
+			goto finish;
+		}
+		ret = add_uboot_param("rootfs_size", 0);
+		if (ret < 0) {
+			fprintf(stderr, "rootfs_size value addition Failed\n");
+			goto finish;
+		}
+	}
+	ret = upgrade_image(img);
+	if (ret == 0)
+		system("touch /tmp/.upg_progress");
+
+finish:
+	if ((img.src_img_addr != NULL) && (flag == 1)) {
+		if(munmap(img.src_img_addr,  img.src_img_len) != 0)
+			fprintf(stderr, "unmaping failied\n");
+	}
+	if(file_fd >= 0)
+		close(file_fd);
+	return ret;
+}
+#endif

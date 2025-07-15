@@ -1,6 +1,6 @@
 /******************************************************************************
 
-  Copyright (C) 2022 MaxLinear, Inc.
+  Copyright (C) 2022-2024 MaxLinear, Inc.
 
   For licensing information, see the file 'LICENSE' in the root folder of
   this software module.
@@ -28,9 +28,9 @@
 #include "help_error.h"
 #include "help_logging.h"
 
-#include "libsafec/safe_str_lib.h"
-#include "libsafec/safe_lib.h"
-#include "libsafec/safe_mem_lib.h"
+#include "safe_str_lib.h"
+#include "safe_lib.h"
+#include "safe_mem_lib.h"
 
 /**===============================================================================================
  * @brief Initializes and starts a authenticatation session for opening a debug port

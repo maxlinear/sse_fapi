@@ -1,6 +1,6 @@
 /*******************************************************************************
 
-  Copyright © 2020-2021 MaxLinear, Inc.
+  Copyright © 2020-2024 MaxLinear, Inc.
 
   For licensing information, see the file 'LICENSE' in the root folder of
   this software module.
@@ -29,9 +29,9 @@
 #include "secdbg_ctest_util.h"
 #endif
 
-#include "libsafec/safe_str_lib.h"
-#include "libsafec/safe_lib.h"
-#include "libsafec/safe_mem_lib.h"
+#include "safe_str_lib.h"
+#include "safe_lib.h"
+#include "safe_mem_lib.h"
 
 extern char p_name[MAX_USER_NAME];
 
