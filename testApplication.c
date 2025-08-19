@@ -345,12 +345,12 @@ int main(int argc, char **argv)
                 break;
             case 'd':
                 unDataLen = strnlen_s(optarg, MAX_DATABUF_LEN);
-                pcOrigData = (char*) malloc(unDataLen);
+                pcOrigData = (char*) malloc(unDataLen+1);
                 if (!pcOrigData) {
                     PRINT("memory allocation failed");
                     return -1;
                 }
-                if (strncpy_s(pcOrigData, unDataLen, optarg, (unDataLen - 1))
+                if (strncpy_s(pcOrigData, unDataLen+1, optarg, (unDataLen))
                         != EOK) {
                     PRINT("error in copying the data");
                     return -1;
