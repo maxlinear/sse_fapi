@@ -63,6 +63,11 @@ void display_object_config(sst_obj_config_t *pxSstConfig)
     fprintf(stdout, "ignore pname bit: 0x%x\n", pxSstConfig->policy_attr.u.field.ignore_pname);
     fprintf(stdout, "crypto mode flag: 0x%x\n", pxSstConfig->crypto_mode_flag);
     fprintf(stdout, "admin node flag: 0x%x\n", pxSstConfig->policy_attr.u.field.admin_store);
+    fprintf(stdout, "wrap flag: 0x%x\n", pxSstConfig->policy_attr.u.field.wrap_flag);
+    fprintf(stdout, "wrap key location: 0x%x\n", pxSstConfig->wrap_asset.key_location);
+    if (pxSstConfig->wrap_asset.key_location & KEY_IN_OTP) {
+        fprintf(stdout, "wrap key asset ID: 0x%x\n", pxSstConfig->wrap_asset.u.asset_number);
+    }
 }
 
 /*
@@ -107,6 +112,105 @@ void set_object_config(sst_obj_config_t *pxSstConfig, uint32_t unObjectConfig)
 
 	/* Admin/Normal node access */
 	pxSstConfig->policy_attr.u.field.admin_store = unObjectConfig & 1;
+}
+
+/* Create/Save/Load object with invalid wrap asset number */
+CTEST(suite11, wrap_flag_01_test1) {
+    sst_obj_config_t xSstConfig = {0};
+    secure_wrap_asset_t xWrapConfig = {0};
+    sshandle_t xSsHandle = 0;
+    /* below series of hex values indicates the wrapped data of "Hello, I'm Atom1234" */
+    unsigned int cBuf[] = {0x652241e6, 0x4c5aa580, 0x96e34630, 0x24cef880, 0xb587a507, 0x74c29952, 0x461eaf00, 0x13b1667e};
+    unsigned char cLoadBuf[32] = {0};
+    uint32_t nActLen = 0;
+    int nRet = -1;
+    unsigned int *ppcLoadData = NULL;
+
+    set_object_config(&xSstConfig, 0x0140CF);
+    xSstConfig.wrap_asset.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+    xSstConfig.wrap_asset.u.asset_number = OTP_CUST_ASSET_12; /* valid range: 11-30 */
+    display_object_config(&xSstConfig);
+
+    nRet = securestore_create_open("wrap_otp", &xSstConfig, SS_CREATE, &xSsHandle);
+    if (nRet == -SST_OBJ_ALREADY_EXIST_ERROR) {
+        nRet = securestore_create_open("wrap_otp", &xSstConfig, 0, &xSsHandle);
+    }
+    ASSERT_EQUAL(0, nRet);
+
+    xWrapConfig.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+    xWrapConfig.u.asset_number = OTP_CUST_ASSET_12; /* valid range: 11-30 */
+
+    nRet = securestore_save(xSsHandle, &xWrapConfig, (unsigned char *)cBuf, (unsigned int)sizeof(cBuf));
+    ASSERT_EQUAL(0, nRet);
+
+    securestore_retrieve(xSsHandle, &xWrapConfig, cLoadBuf, (unsigned int)sizeof(cLoadBuf), &nActLen);
+
+    ppcLoadData = (unsigned int *)cLoadBuf;
+    for (unsigned int i = 0; i < (nActLen/sizeof(int)); i++) {
+        fprintf(stdout, "%x\n", *ppcLoadData);
+        ppcLoadData++;
+    }
+
+    nRet = securestore_delete(xSsHandle);
+    ASSERT_EQUAL(0, nRet);
+}
+
+/* Create/Open/Save/Load object with invalid wrap asset number */
+CTEST(suite10, invalid_asset_number_test1) {
+    sst_obj_config_t xSstConfig = {0};
+    secure_wrap_asset_t xWrapConfig = {0};
+    sshandle_t xSsHandle = 0;
+    unsigned char cBuf[] = ATOM_MSG;
+    unsigned char cLoadBuf[32] = {0};
+    uint32_t nActLen = 0;
+    int nRet = -1;
+
+    set_object_config(&xSstConfig, 0x0180CF);
+    xSstConfig.wrap_asset.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+    xSstConfig.wrap_asset.u.asset_number = 1; /* valid range: 11-30 */
+    display_object_config(&xSstConfig);
+
+    /* invalid asset number to create FAPI */
+    nRet = securestore_create_open("wrap_otp", &xSstConfig, SS_CREATE, &xSsHandle);
+    if (nRet == -SST_INVALID_ASSET_ID_ERROR)
+        fprintf(stdout, "[Create] Invalid asset number(%d) blocked\n", xSstConfig.wrap_asset.u.asset_number);
+    ASSERT_NOT_EQUAL(0, nRet);
+
+    /* invalid asset number to open FAPI */
+    nRet = securestore_create_open("wrap_otp", &xSstConfig, 0, &xSsHandle);
+    if (nRet == -SST_INVALID_ASSET_ID_ERROR)
+        fprintf(stdout, "[Open] Invalid asset number(%d) blocked\n", xSstConfig.wrap_asset.u.asset_number);
+    ASSERT_NOT_EQUAL(0, nRet);
+
+    memset_s(&xSstConfig, sizeof(xSstConfig), 0x0, sizeof(xSstConfig));
+    set_object_config(&xSstConfig, 0x0180CF);
+    xSstConfig.wrap_asset.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+    xSstConfig.wrap_asset.u.asset_number = OTP_CUST_ASSET_12; /* valid range: 11-30 */
+    display_object_config(&xSstConfig);
+
+    nRet = securestore_create_open("wrap_otp", &xSstConfig, SS_CREATE, &xSsHandle);
+    if (nRet == -SST_OBJ_ALREADY_EXIST_ERROR) {
+        nRet = securestore_create_open("wrap_otp", &xSstConfig, 0, &xSsHandle);
+    }
+    ASSERT_EQUAL(0, nRet);
+
+    xWrapConfig.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+    xWrapConfig.u.asset_number = 31; /* valid range: 11-30 */
+
+    /* invalid asset number to save FAPI */
+    nRet = securestore_save(xSsHandle, &xWrapConfig, cBuf, (unsigned int)sizeof(cBuf));
+    if (nRet == -SST_INVALID_ASSET_ID_ERROR)
+        fprintf(stdout, "[Save] Invalid asset number(%d) blocked\n", xWrapConfig.u.asset_number);
+    ASSERT_NOT_EQUAL(0, nRet);
+
+    /* invalid asset number to load FAPI */
+    nRet = securestore_retrieve(xSsHandle, &xWrapConfig, cLoadBuf, (unsigned int)sizeof(cLoadBuf), &nActLen);
+    if (nRet == -SST_INVALID_ASSET_ID_ERROR)
+        fprintf(stdout, "[Load] Invalid asset number(%d) blocked\n", xWrapConfig.u.asset_number);
+    ASSERT_NOT_EQUAL(0, nRet);
+
+    nRet = securestore_delete(xSsHandle);
+    ASSERT_EQUAL(0, nRet);
 }
 
 /* Max capacity test for data saving */
@@ -157,7 +261,7 @@ read_cont:
     }
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_save(xSsHandle, pc1MbBuf, nCount);
+    nRet = securestore_save(xSsHandle, NULL, pc1MbBuf, nCount);
     if (nRet < 0) {
         fprintf(stdout, "failed to save the data\n");
         free(pc1MbBuf);
@@ -350,7 +454,7 @@ CTEST(suite4, readonce_policy_test2) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_retrieve(xSsHandle, cLoadBuf,
+    nRet = securestore_retrieve(xSsHandle, NULL, cLoadBuf,
             (unsigned int)sizeof(cLoadBuf), &nActLen);
 
     fprintf(stdout, "####### nRet = %d\n", nRet);
@@ -383,11 +487,11 @@ CTEST(suite4, readonce_policy_test) {
         nRet = securestore_create_open("test_admin_rdone", &xSstConfig, 0,
                 &xSsHandle);
     } else {
-        nRet = securestore_save(xSsHandle, cBuf, (unsigned int)sizeof(cBuf));
+        nRet = securestore_save(xSsHandle, NULL, cBuf, (unsigned int)sizeof(cBuf));
     }
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_retrieve(xSsHandle, cLoadBuf,
+    nRet = securestore_retrieve(xSsHandle, NULL, cLoadBuf,
             (unsigned int)sizeof(cLoadBuf), &nActLen);
     ASSERT_STR((char*)cBuf, (char*)cLoadBuf);
 }
@@ -409,14 +513,14 @@ CTEST(suite4, lock_policy_test) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_save(xSsHandle, cBuf, (unsigned int)sizeof(cBuf));
+    nRet = securestore_save(xSsHandle, NULL, cBuf, (unsigned int)sizeof(cBuf));
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_retrieve(xSsHandle, cLoadBuf,
+    nRet = securestore_retrieve(xSsHandle, NULL, cLoadBuf,
             (unsigned int)sizeof(cLoadBuf), &nActLen);
     ASSERT_EQUAL(sizeof(cBuf), (intmax_t)nRet);
 
-    nRet = securestore_save(xSsHandle, cModBuf, (unsigned int)sizeof(cModBuf));
+    nRet = securestore_save(xSsHandle, NULL, cModBuf, (unsigned int)sizeof(cModBuf));
     ASSERT_NOT_EQUAL(0, nRet);
 
 /*  Needs further discussion to delete locked objects */
@@ -440,7 +544,7 @@ CTEST(suite3, read_policy_test1) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_save(xSsHandle, cBuf, (unsigned int)sizeof(cBuf));
+    nRet = securestore_save(xSsHandle, NULL, cBuf, (unsigned int)sizeof(cBuf));
     ASSERT_EQUAL(-SST_OBJ_ACCESS_PERMS_ERROR, nRet);
 
     nRet = securestore_delete(xSsHandle);
@@ -463,7 +567,7 @@ CTEST(suite3, write_policy_test2) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_retrieve(xSsHandle, cLoadBuf,
+    nRet = securestore_retrieve(xSsHandle, NULL, cLoadBuf,
             (unsigned int)sizeof(cLoadBuf), &nActLen);
     if (nRet > 0) {
         ASSERT_STR((char*)cBuf, (char*)cLoadBuf);
@@ -487,7 +591,7 @@ CTEST(suite3, write_policy_test1) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_save(xSsHandle, cBuf, (unsigned int)sizeof(cBuf));
+    nRet = securestore_save(xSsHandle, NULL, cBuf, (unsigned int)sizeof(cBuf));
     ASSERT_EQUAL(0, nRet);
 
     nRet = securestore_delete(xSsHandle);
@@ -511,18 +615,18 @@ CTEST(suite2, modify_data_test) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_save(xSsHandle, cBuf, (unsigned int)sizeof(cBuf));
+    nRet = securestore_save(xSsHandle, NULL, cBuf, (unsigned int)sizeof(cBuf));
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_retrieve(xSsHandle, cLoadBuf,
+    nRet = securestore_retrieve(xSsHandle, NULL, cLoadBuf,
             (unsigned int)sizeof(cLoadBuf), &nActLen);
     fprintf(stdout, "Content before modifying -'%s'\n", cLoadBuf);
 
-    nRet = securestore_save(xSsHandle, cModBuf, (unsigned int)sizeof(cModBuf));
+    nRet = securestore_save(xSsHandle, NULL, cModBuf, (unsigned int)sizeof(cModBuf));
     ASSERT_EQUAL(0, nRet);
 
     memset_s(cLoadBuf, sizeof(cLoadBuf), 0x0, sizeof(cLoadBuf));
-    nRet = securestore_retrieve(xSsHandle, cLoadBuf,
+    nRet = securestore_retrieve(xSsHandle, NULL, cLoadBuf,
             (unsigned int)sizeof(cLoadBuf), &nActLen);
     fprintf(stdout, "Content after modifying -'%s'\n", cLoadBuf);
 
@@ -544,7 +648,7 @@ CTEST(suite2, save_data_test) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_save(xSsHandle, cBuf, (unsigned int)sizeof(cBuf));
+    nRet = securestore_save(xSsHandle, NULL, cBuf, (unsigned int)sizeof(cBuf));
     ASSERT_EQUAL(0, nRet);
 
     nRet = securestore_delete(xSsHandle);
@@ -567,7 +671,7 @@ CTEST(suite2, load_cpdo_test) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_retrieve(xSsHandle, cLoadBuf,
+    nRet = securestore_retrieve(xSsHandle, NULL, cLoadBuf,
             (unsigned int)sizeof(cLoadBuf), &nActLen);
     ASSERT_STR((char*)cBuf, (char*)cLoadBuf);
 
@@ -591,10 +695,10 @@ CTEST(suite2, load_save_test) {
             &xSsHandle);
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_save(xSsHandle, cBuf, (unsigned int)sizeof(cBuf));
+    nRet = securestore_save(xSsHandle, NULL, cBuf, (unsigned int)sizeof(cBuf));
     ASSERT_EQUAL(0, nRet);
 
-    nRet = securestore_retrieve(xSsHandle, cLoadBuf,
+    nRet = securestore_retrieve(xSsHandle, NULL, cLoadBuf,
             (unsigned int)sizeof(cLoadBuf), &nActLen);
     ASSERT_STR((char*)cBuf, (char*)cLoadBuf);
 }

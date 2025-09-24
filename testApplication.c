@@ -69,12 +69,18 @@ static char cStorageOps[NUM_STORAGE_OPTS][MAX_OPTBUF_LEN] = {
 #endif
         };
 
+enum wrap_key_location {
+    WRAP_KEY_SST_HANDLE = 0x6,
+    WRAP_KEY_OTP        = 0x7,
+};
+
 /* function declarations */
 void display_object_config(sst_obj_config_t *pxSsstConfig);
 void set_object_config(sst_obj_config_t *pxSstConfig, uint32_t unObjectConfig);
 int img_auth_option(char *pcStorageOp, const char *pcFileName);
 int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
-        uint32_t unObjectConfig, const char *pcOrigData, uint32_t unDataLen);
+        uint32_t unObjectConfig, const char *pcOrigData, uint32_t unDataLen,
+        unsigned char wrap_key_asset);
 #ifdef SECDBG_TOOL
 int secure_debug_option(uint16_t unPortNum, uint32_t unObjectConfig);
 #endif
@@ -103,6 +109,11 @@ void display_object_config(sst_obj_config_t *pxSstConfig)
     fprintf(stdout, "ignore pname bit: 0x%x\n", pxSstConfig->policy_attr.u.field.ignore_pname);
     fprintf(stdout, "crypto mode flag: 0x%x\n", pxSstConfig->crypto_mode_flag);
     fprintf(stdout, "admin node flag: 0x%x\n", pxSstConfig->policy_attr.u.field.admin_store);
+    fprintf(stdout, "wrap flag: 0x%x\n", pxSstConfig->policy_attr.u.field.wrap_flag);
+    fprintf(stdout, "wrap key location: 0x%x\n", pxSstConfig->wrap_asset.key_location);
+    if (pxSstConfig->wrap_asset.key_location & KEY_IN_OTP) {
+        fprintf(stdout, "wrap key asset ID: 0x%x\n", pxSstConfig->wrap_asset.u.asset_number);
+    }
 }
 
 /*
@@ -223,9 +234,9 @@ static void help_cmdexample(void)
     fprintf(stdout, "sse_test_app -o decrypt -n file_name\n");
     fprintf(stdout, "sse_test_app -o encrypt -n file_name\n");
     fprintf(stdout, "sse_test_app -o img_auth -n file_name\n");
-    fprintf(stdout, "sse_test_app -o sec_create -n object_name -c 0x0100cf\n");
-    fprintf(stdout, "sse_test_app -o sec_save -n object_name -d \"Hello, I'm Atom\"\n");
-    fprintf(stdout, "sse_test_app -o sec_load -n object_name\n");
+    fprintf(stdout, "sse_test_app -o sec_create -n object_name -c 0x0100cf [-k -t <asset_number>]\n");
+    fprintf(stdout, "sse_test_app -o sec_save -n object_name -d \"Hello, I'm Atom\" [-k -t <asset_number>]\n");
+    fprintf(stdout, "sse_test_app -o sec_load -n object_name [-k -t <asset_number>]\n");
     fprintf(stdout, "sse_test_app -o sec_delete -n object_name\n");
 #ifdef SECDBG_TOOL
     fprintf(stdout, "sse_test_app -o secdbg -p 2 -c 0x0100cf\n");
@@ -249,6 +260,8 @@ static void help_cmdopt(void)
     fprintf(stdout, "   -o storage operation   => decrypt, encrypt, img_auth, sec_create, sec_save, sec_load, sec_delete and secdbg\n");
     fprintf(stdout, "   -n object or file name => test_admin, test_normal etc.. is optional for secure debug operation\n");
     fprintf(stdout, "   -c object config       => required in case of sec_create and secdbg store operation\n");
+    fprintf(stdout, "   -k wrap key usage      => required when the wrap support is needed - sec_create, sec_save and sec_load\n");
+    fprintf(stdout, "   -t otp wrap key        => range 11-30 (wrap key asset number in the otp)\n");
 #ifdef SECDBG_TOOL
     fprintf(stdout, "   -p debug port number   => range 0-7\n");
 #endif
@@ -289,6 +302,7 @@ int main(int argc, char **argv)
 #endif
     char cStorageOp[MAX_OPTBUF_LEN] = {0};
     char *pcOrigData = NULL;
+    unsigned char wrap_key_asset = 0;
     uint32_t unObjectConfig = 0;
 #ifdef SECDBG_TOOL
     uint16_t unPortNum = 0xFFFF;
@@ -296,14 +310,17 @@ int main(int argc, char **argv)
     uint32_t unDataLen = 0;
     char *cEndPtr = NULL;
     int nIdx = -1;
+    int prev_opt = -1;
+    int asset_id = 0;
 
     if (argc == 1) {
         help_cmdopt();
     }
 
-    while ((nIdx = getopt(argc, argv, "o:n:c:d:p:h:u:e:v:")) != -1) {
+    while ((nIdx = getopt(argc, argv, "o:n:c:d:p:h:u:e:v:t:k")) != -1) {
         switch (nIdx) {
             case 'o':
+                prev_opt = nIdx;
                 if (sprintf_s(cStorageOp, MAX_OPTBUF_LEN, "%s", optarg) < 0) {
                     PRINT("error in copying storage operation");
                     return -1;
@@ -356,6 +373,28 @@ int main(int argc, char **argv)
                     return -1;
                 }
                 break;
+            case 'k':
+                prev_opt = nIdx;
+                break;
+            case 't':
+                if (prev_opt != 'k') {
+                    PRINT("user option is misaligned - error in processing [-%c]", nIdx);
+                    return -1;
+                }
+                if (wrap_key_asset == 0) {
+                    wrap_key_asset = (1 << WRAP_KEY_OTP);
+                    asset_id = atoi(optarg);
+                    if ((asset_id < MIN_OTP_ASSET_ID) || (asset_id > MAX_OTP_ASSET_ID)) {
+                        PRINT("invalid asset ID");
+                        return -1;
+                    } else {
+                      wrap_key_asset |= asset_id;
+                    }
+                } else {
+                    PRINT("configuring wrap_key multiple times");
+                    return -1;
+                }
+                break;
 #ifdef SECDBG_TOOL
             case 'p':
                 if ((unPortNum = (uint16_t)atoi(optarg)) == 0xFFFF) {
@@ -397,7 +436,7 @@ int main(int argc, char **argv)
             help_cmdexample();
         }
         secure_storage_option(cStorageOp, cFileName, unObjectConfig, pcOrigData,
-                unDataLen);
+                unDataLen, wrap_key_asset);
 #ifdef SECDBG_TOOL
     } else if (nIdx == 7) {
         if (strnlen_s(cFileName, MAX_OPTBUF_LEN) != 0) {
@@ -589,11 +628,14 @@ end:
  *  return 0 on success and -ve value on failure
  */
 int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
-        uint32_t unObjectConfig, const char *pcOrigData, uint32_t unDataLen)
+        uint32_t unObjectConfig, const char *pcOrigData, uint32_t unDataLen,
+        unsigned char wrap_key_asset)
 {
     sst_obj_config_t xSstConfig = {0};
+    secure_wrap_asset_t xWrapConfig = {0};
     sshandle_t xSsHandle = -1;
     int nRet = -1;
+    int asset_id = 0;
 
     if ((!pcStorageOp) || (strnlen_s(pcStorageOp, MAX_OPTBUF_LEN) == 0)) {
         PRINT("storage operation should not be empty");
@@ -619,6 +661,15 @@ int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
             }
 
             set_object_config(&xSstConfig, unObjectConfig);
+
+            if (wrap_key_asset) {
+                if (wrap_key_asset & (1 << WRAP_KEY_OTP)) {
+                    asset_id = wrap_key_asset & 0x3F;
+                    /* share the wrap asset details during create */
+                    xSstConfig.wrap_asset.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+                    xSstConfig.wrap_asset.u.asset_number = asset_id;
+                }
+            }
             display_object_config(&xSstConfig);
 
             nRet = securestore_create_open(pcObjectName, &xSstConfig, SS_CREATE,
@@ -644,6 +695,19 @@ int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
                 goto end;
             }
 
+            if (wrap_key_asset) {
+                if (wrap_key_asset & (1 << WRAP_KEY_OTP)) {
+                    asset_id = wrap_key_asset & 0x3F;
+                    /* share the wrap asset details during open */
+                    xSstConfig.wrap_asset.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+                    xSstConfig.wrap_asset.u.asset_number = asset_id;
+                    display_object_config(&xSstConfig);
+                    /* share the wrap asset details during save */
+                    xWrapConfig.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+                    xWrapConfig.u.asset_number = asset_id;
+                }
+            }
+
             nRet = securestore_create_open(pcObjectName, &xSstConfig, 0,
                     &xSsHandle);
             if (nRet < 0) {
@@ -654,7 +718,7 @@ int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
             PRINT("ss handle received - [%ld]", xSsHandle);
 
             /* saves the cOrigData in cryptographically protected form */
-            nRet = securestore_save(xSsHandle, (const unsigned char *)pcOrigData,
+            nRet = securestore_save(xSsHandle, &xWrapConfig, (const unsigned char *)pcOrigData,
                     unDataLen);
             if (nRet < 0) {
                 PRINT("failed to save data nRet:%s", to_string(nRet));
@@ -687,6 +751,20 @@ int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
                 PRINT("memory allocation failed");
                 goto end;
             }
+
+            if (wrap_key_asset) {
+                if (wrap_key_asset & (1 << WRAP_KEY_OTP)) {
+                    asset_id = wrap_key_asset & 0x3F;
+                    /* share the wrap asset details during open */
+                    xSstConfig.wrap_asset.key_location = KEY_IN_OTP; /* 0b01 - OTP */
+                    xSstConfig.wrap_asset.u.asset_number = asset_id;
+                    display_object_config(&xSstConfig);
+                    /* share the wrap asset details during load */
+                    xWrapConfig.key_location = KEY_IN_OTP; /* 0b01 - OTP */;
+                    xWrapConfig.u.asset_number = asset_id;
+                }
+            }
+
             nRet = securestore_create_open(pcObjectName, &xSstConfig, 0,
                     &xSsHandle);
             if (nRet < 0) {
@@ -697,8 +775,8 @@ int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
             PRINT("ss handle received - [%ld]", xSsHandle);
 
             /* retrieves the data and displayed in plain text */
-            nRet = securestore_retrieve(xSsHandle, pcLoadData, MAX_DATABUF_LEN,
-                    &nActLen);
+            nRet = securestore_retrieve(xSsHandle, &xWrapConfig, pcLoadData,
+                    MAX_DATABUF_LEN, &nActLen);
             if (nRet < 0) {
                 PRINT("failed to load nRet:%s", to_string(nRet));
                 goto end;

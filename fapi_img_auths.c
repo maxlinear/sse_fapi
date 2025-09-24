@@ -97,7 +97,11 @@ static const int image_list[] = {
 	BOOTLOADERFIT,
 	TEPFIT,
 	KERNELDTBFIT|ROOTFSFIT,
+#ifdef IMG_AUTH
 	RBE|BOOTLOADERFIT|TEPFIT|ROOTFSFIT|KERNELDTBFIT,
+#else
+	RBE|BOOTLOADERFIT|ROOTFSFIT|KERNELDTBFIT,
+#endif
 };
 #define ARRAY_SIZE(arr) (int)(sizeof(arr) / sizeof((arr)[0]))
 #endif
@@ -379,9 +383,7 @@ static int fapi_ssValidateDTB(int nFd, const void *addr, uint8_t upgradeOrCommit
 			/* we authenticate only the image after the FIT headers */
 
 			header = data;
-			if (strcmp(fdt_get_name(addr, noffset, NULL), "filesystem") == 0)
-				nRet = fapi_ssvalidateImg(nFd, header, len, upgradeOrCommit);
-			else if(strcmp(fdt_get_name(addr, noffset, NULL), "uboot") == 0)
+			if(strcmp(fdt_get_name(addr, noffset, NULL), "uboot") == 0)
 				nRet = fapi_ssvalidateImg(nFd, header + sizeof(image_header_t), len - sizeof(image_header_t) - BLW_LENGTH, upgradeOrCommit);
 			else
 				nRet = fapi_ssvalidateImg(nFd, header, len - BLW_LENGTH, upgradeOrCommit);
@@ -2046,10 +2048,25 @@ finish:
 int fapi_Switch_bank(char *actbnk)
 {
 	int nRet = 0;
+	char cPath[MAX_PATH_LEN] = {0};
+
+	if (access("/tmp/.upg_progress", F_OK) == 0) {
+		fprintf(stderr, "upgrade in progress, do reboot before switch bank\n");
+		return -ECANCELED;
+	}
 	if (!(strcmp(actbnk, "A") == 0 || strcmp(actbnk, "B") == 0)) {
 		LOGF_LOG_ERROR("Invalid active_bank '%s'\n", actbnk);
-		nRet = -EINVAL;
+		return -EINVAL;
 	}
+	if (get_uboot_param("active_bank", cPath) != 0) {
+		fprintf(stderr, "Failed to get variable\n");
+		return -ENOENT;
+	}
+	if ((strcmp(actbnk, cPath) == 0)) {
+		fprintf(stderr, "Current active_bank is %s, bank switching not needed\n", actbnk);
+		return -ECANCELED;
+	}
+
 	if (set_uboot_param_str("active_bank", actbnk) != 0) {
 		fprintf(stderr, "Failed to set active_bank\n");
 		nRet = -EPERM;
@@ -2070,6 +2087,7 @@ int fapi_Switch_bank(char *actbnk)
 int fapi_Get_lastupg_status(char *value)
 {
 	char cPath[MAX_PATH_LEN] = {0};
+
 	if (get_uboot_param("last_upg_status", cPath) != 0) {
 		fprintf(stderr, "Failed to get variable\n");
 		return -ENOENT;
@@ -2305,6 +2323,7 @@ int upgrade_nested_fit(const void *fit, img_param_t image_auth, int *early_boot)
 	const void *data;
 	void *aligned_node_buf = NULL;
 	const char* node_name;
+	uint32_t file_size = 0;
 	
 	noffset = fdt_path_offset(fit, FIT_IMAGES_PATH);
 	if (noffset < 0) {
@@ -2331,24 +2350,41 @@ int upgrade_nested_fit(const void *fit, img_param_t image_auth, int *early_boot)
 			node_name = fdt_get_name(fit, noffset, NULL);	
 			if((strcmp(node_name, "uboot") == 0) || (strcmp(node_name, "tep") == 0)
 				|| (strcmp(node_name, "rbe") == 0)) {
-				*early_boot = 1;
+				*early_boot |= 1;
 				strncpy_s(image_auth.img_name, sizeof(image_auth.img_name), node_name, strlen(node_name));
 			} else if(strcmp(node_name, "kernel-dtb") == 0) {
+				*early_boot |= 2;
 				strncpy_s(image_auth.img_name, sizeof(image_auth.img_name), "kernel", strlen("kernel"));
 			} else if(strcmp(node_name, "filesystem") == 0) {
+				*early_boot |= 2;
 				strncpy_s(image_auth.img_name, sizeof(image_auth.img_name), "rootfs", strlen("rootfs"));
 			}
 			if (!fdt_check_header(aligned_node_buf)) { 
 				image_auth.src_img_addr = (unsigned char *)aligned_node_buf;
 			} else {
 				if (strcmp(node_name, "rbe") == 0) {
+					uint32_t cur_par_size=0, pad, file_read_size =0;
+					image_header_t x_img_header;
  					/*RBE image came here, may be part of total image.Pass just the data as RBE is not fit image*/
 					image_auth.src_img_addr = (unsigned char *)aligned_node_buf;
+					x_img_header = *((image_header_t *)image_auth.src_img_addr);
+					fprintf(stdout, "Image contains header with name [%s]\n",x_img_header.img_hdr_name);
+
+					cur_par_size = sizeof(image_header_t) + ntohl(x_img_header.img_hdr_size);
+					pad = (16 - (cur_par_size % 16)) % 16;
+					file_read_size = cur_par_size + pad;
+					fprintf(stdout, "This is not kernel or uboot image and so removing header\n");
+					image_auth.src_img_addr += sizeof(image_header_t);
+					file_size = image_auth.src_img_len;
+					image_auth.src_img_len = file_read_size - pad - sizeof(image_header_t);
+					strncpy_s(image_auth.img_name, MAX_PATH_LEN, node_name, MAX_PATH_LEN);
 				} else {
 					image_auth.src_img_addr = (unsigned char *)fit;
 				}
 			}
 			fprintf(stdout, "fapi_ssImgUpgrade called for %s\n", image_auth.img_name);
+			if ((strcmp(node_name, "kernel-dtb") == 0) || (strcmp(node_name, "filesystem") == 0))
+				image_auth.src_img_len = len;
 			if (fapi_ssImgUpgrade(image_auth) < 0) {
 				fprintf(stderr, "%s Image upgrade passed\n", image_auth.img_name);
 				if (aligned_node_buf != NULL) {
@@ -2356,9 +2392,22 @@ int upgrade_nested_fit(const void *fit, img_param_t image_auth, int *early_boot)
 					aligned_node_buf = NULL;
 				}
 				return -EPERM;
-			} else 
+			} else {
 				fprintf(stderr, "%s Image upgrade passed\n", image_auth.img_name);
-				
+				if (strcmp(node_name, "rbe") == 0) {
+					if (set_uboot_param_int("rbe_size", image_auth.src_img_len) != 0) {
+						fprintf(stderr, "Setting the rbe_size value Failed\n");
+						image_auth.src_img_addr -= sizeof(image_header_t);
+						if (aligned_node_buf != NULL) {
+							free(aligned_node_buf);
+							aligned_node_buf = NULL;
+						}
+						return -EINVAL;
+					}
+					image_auth.src_img_addr -= sizeof(image_header_t);
+					image_auth.src_img_len = file_size;
+				}
+			}
 		}
 	}
 	if (aligned_node_buf != NULL) {
@@ -2374,6 +2423,7 @@ int validate_nested_fit(const void *fit, img_param_t image_auth, int *currentima
 	const void *data;
 	void *aligned_node_buf = NULL;
 	const char* node_name;
+	uint32_t file_size = 0;
 
 	noffset = fdt_path_offset(fit, FIT_IMAGES_PATH);
 	if (noffset < 0) {
@@ -2382,13 +2432,13 @@ int validate_nested_fit(const void *fit, img_param_t image_auth, int *currentima
 	}
 	
 	while ((noffset = fdt_next_node(fit, noffset, &depth)) >= 0) {
-                LOGF_LOG_DEBUG("noffset %d depth %d name %s\n", noffset, depth,
-                      fdt_get_name(fit, noffset, NULL));
+		LOGF_LOG_DEBUG("noffset %d depth %d name %s\n", noffset, depth,
+						fdt_get_name(fit, noffset, NULL));
 		if (depth < 1)
 			break;
 		if (depth == 1) {
-                	fprintf(stdout,"\nnoffset %d depth %d name %s\n", noffset, depth,
-                      		fdt_get_name(fit, noffset, NULL));
+			fprintf(stdout,"\nnoffset %d depth %d name %s\n", noffset, depth,
+					fdt_get_name(fit, noffset, NULL));
 			data = fdt_getprop(fit, noffset, FIT_DATA_PROP, &len);
 			if (!data || len <= 0)
 				continue;
@@ -2418,7 +2468,7 @@ int validate_nested_fit(const void *fit, img_param_t image_auth, int *currentima
 			if (!fdt_check_header(aligned_node_buf)) {
 				image_auth.src_img_addr = (unsigned char *)aligned_node_buf;
 				fprintf(stdout, "Image authentication called for %s\n", image_auth.img_name);
-				if (fapi_ssImgAuth(image_auth) < 0){
+				if (fapi_ssImgAuth(image_auth) < 0) {
 					fprintf(stderr, "%s Validation failed\n", image_auth.img_name);
 					if (aligned_node_buf != NULL)
 						free(aligned_node_buf);
@@ -2427,10 +2477,22 @@ int validate_nested_fit(const void *fit, img_param_t image_auth, int *currentima
 					fprintf(stdout, "%s Validation passed\n", image_auth.img_name);
 			} else {
 				if (strcmp(node_name, "rbe") == 0) {
+					uint32_t cur_par_size=0, pad, file_read_size =0;
+					image_header_t x_img_header;
 					/*RBE image came here, may be part of total image*/
 					image_auth.src_img_addr = (unsigned char *)aligned_node_buf; 
-				}
-				else { 
+					x_img_header = *((image_header_t *)image_auth.src_img_addr);
+					fprintf(stdout, "Image contains header with name [%s]\n",x_img_header.img_hdr_name);
+
+					cur_par_size = sizeof(image_header_t) + ntohl(x_img_header.img_hdr_size);
+					pad = (16 - (cur_par_size % 16)) % 16;
+					file_read_size = cur_par_size + pad;
+					fprintf(stdout, "This is not kernel or uboot image and so removing header\n");
+					image_auth.src_img_addr += sizeof(image_header_t);
+					file_size = image_auth.src_img_len;
+					image_auth.src_img_len = file_read_size - pad - sizeof(image_header_t);
+					strncpy_s(image_auth.img_name, MAX_PATH_LEN, node_name, MAX_PATH_LEN);
+				} else { 
 					image_auth.src_img_addr = (unsigned char *)fit;
 				}
 				fprintf(stdout, "Image authentication called for %s\n", image_auth.img_name);
@@ -2441,6 +2503,10 @@ int validate_nested_fit(const void *fit, img_param_t image_auth, int *currentima
 					return -EPERM;
 				} else 
 					fprintf(stderr, "\n%s Validation passed\n", image_auth.img_name);
+				if (strcmp(node_name, "rbe") == 0) {
+					image_auth.src_img_addr -= sizeof(image_header_t);
+					image_auth.src_img_len = file_size;
+				}
 			}
 		}
 	}
@@ -2638,9 +2704,9 @@ static int upgrade_image(const img_param_t img)
 			if (fullimage != 1) {
 				ret = upgrade_nested_fit((void *)header, img_param, &earlyboot);
 				if (ret > 0) {
-					if (earlyboot == 1)
+					if (earlyboot & 1)
 						sprintf_s(early_boot, sizeof(name), "early_boot");
-					else
+					if (earlyboot & 2)
 						sprintf_s(late_boot, sizeof(name), "late_boot");
 
 					file_read_size = ret;
@@ -2834,6 +2900,12 @@ int fapi_Image_upgrade(const char *path)
 		ret = -ECANCELED;
 		goto finish;
 	}
+
+	if (access("/tmp/.upg_progress", F_OK) == 0) {
+		fprintf(stderr, "upgrade in progress, do reboot and commit before another upgrade\n");
+		return -ECANCELED;
+	}
+
 	file_fd = open(path, O_RDONLY);
 	if (file_fd < 0) {
 		fprintf(stderr, "The file %s could not be opened\n", path);
@@ -2890,7 +2962,8 @@ int fapi_Image_upgrade(const char *path)
 	val = atoi(cPath);
 
 	if (((val & BOOTLOADER) == BOOTLOADER) ||
-		((val & RBE) == RBE) || ((val & TEP) == TEP)) {
+		((val & RBE) == RBE) || ((val & TEP) == TEP) ||
+		((val & BOOTLOADERFIT) == BOOTLOADERFIT) || ((val & TEPFIT) == TEPFIT)) {
 		if (set_uboot_param_str("early_boot", "invalid") != 0) {
 			fprintf(stderr, "Setting the early boot status Failed\n");
 			ret = -EPERM;
@@ -2911,16 +2984,19 @@ int fapi_Image_upgrade(const char *path)
 			}
 		}
 	}
-	if (((val & KERNEL) == KERNEL) || ((val & ROOTFS) == ROOTFS) || ((val & DTB) == DTB)) {
+	if (((val & KERNEL) == KERNEL) || ((val & ROOTFS) == ROOTFS) || ((val & DTB) == DTB) ||
+		((val & (KERNELDTBFIT | ROOTFSFIT)) == (KERNELDTBFIT | ROOTFSFIT))) {
 		if (set_uboot_param_str("late_boot", "invalid") != 0) {
 			fprintf(stderr, "Setting the late boot status Failed\n");
 			ret = -EPERM;
 			goto finish;
 		}
-		ret = add_uboot_param("rootfs_size", 0);
-		if (ret < 0) {
-			fprintf(stderr, "rootfs_size value addition Failed\n");
-			goto finish;
+		if (val & ROOTFS) {
+			ret = add_uboot_param("rootfs_size", 0);
+			if (ret < 0) {
+				fprintf(stderr, "rootfs_size value addition Failed\n");
+				goto finish;
+			}
 		}
 	}
 	ret = upgrade_image(img);

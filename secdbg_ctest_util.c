@@ -364,6 +364,12 @@ void display_object_config(sst_obj_config_t *pxSstConfig)
     fprintf(stdout, "ignore gid bit: 0x%x\n", pxSstConfig->policy_attr.u.field.ignore_gid);
     fprintf(stdout, "ignore pname bit: 0x%x\n", pxSstConfig->policy_attr.u.field.ignore_pname);
     fprintf(stdout, "crypto mode flag: 0x%x\n", pxSstConfig->crypto_mode_flag);
+    fprintf(stdout, "admin node flag: 0x%x\n", pxSstConfig->policy_attr.u.field.admin_store);
+    fprintf(stdout, "wrap flag: 0x%x\n", pxSstConfig->policy_attr.u.field.wrap_flag);
+    fprintf(stdout, "wrap key location: 0x%x\n", pxSstConfig->wrap_asset.key_location);
+    if (pxSstConfig->wrap_asset.key_location & KEY_IN_OTP) {
+        fprintf(stdout, "wrap key asset ID: 0x%x\n", pxSstConfig->wrap_asset.u.asset_number);
+    }
 }
 
 /*

@@ -137,7 +137,7 @@ static sst_fd_handle_t *find_sstObject_by_ssHandle(const sshandle_t xSsHandle)
 	}
 
 	for (int count = 0; count < stnOpenfdCount; count++) {
-		printf("xSsHandle[%lx], sst_fd sshandle[%lx]\n", xSsHandle,
+		LOGF_LOG_DEBUG("xSsHandle[%lx], sst_fd sshandle[%lx]\n", xSsHandle,
 				sstFd->ss_handle);
 		memcmp_s(&xSsHandle, sizeof(sshandle_t), &(sstFd->ss_handle),
 				sizeof(sshandle_t), &nDiff);
@@ -160,7 +160,7 @@ static int close_sst_fd(const sshandle_t xSsHandle)
 	sst_fd_handle_t *prev_sstFd = NULL;
 
 	for (int count = 0; count < stnOpenfdCount; count++) {
-		printf("xSsHandle[%lx], sst_fd sshandle[%lx]\n", xSsHandle,
+		LOGF_LOG_DEBUG("xSsHandle[%lx], sst_fd sshandle[%lx]\n", xSsHandle,
 				sstFd->ss_handle);
 		memcmp_s(&xSsHandle, sizeof(sshandle_t), &(sstFd->ss_handle),
 				sizeof(sshandle_t), &nDiff);
@@ -254,6 +254,7 @@ int securestore_create_open(const char *pszObjectName,
 	sst_fd_handle_t *sstFd = NULL;
 	int nObjectLen = -1;
 	sst_fd_handle_t *new_sst_fd = sst_fd;
+	bool wrap_asset_flag = false;
 
 	nObjectLen = strnlen_s(pszObjectName, FILEPNAME_MAX + 1);
 
@@ -278,6 +279,21 @@ int securestore_create_open(const char *pszObjectName,
 			goto out;
 		}
 	}
+
+	/* Check if user has passed the valid asset number if wrap key is in OTP */
+	if (pcxObjPolicy && pcxObjPolicy->wrap_asset.key_location) {
+		if (pcxObjPolicy->wrap_asset.key_location & KEY_IN_OTP) { /* 0b01 - OTP */
+			if ((pcxObjPolicy->wrap_asset.u.asset_number < MIN_OTP_ASSET_ID) ||
+			    (pcxObjPolicy->wrap_asset.u.asset_number > MAX_OTP_ASSET_ID)) {
+				LOGF_LOG_ERROR("<Secure store> Invalid wrap key configuration");
+				ret = -SST_INVALID_ASSET_ID_ERROR;
+				goto out;
+			} else {
+				wrap_asset_flag = true;
+			}
+		}
+	}
+
     /* Check whether the ssHandle is already available, if yes return the same */
 	sstFd = find_sstObject_by_name(pszObjectName);
 	if (sstFd) {
@@ -295,7 +311,7 @@ int securestore_create_open(const char *pszObjectName,
 	memset_s(&xOpenObject, sizeof(sst_param_t), 0, sizeof(sst_param_t));
 	xOpenObject.objectname = pszObjectName;
 	xOpenObject.sobject_len = nObjectLen;
-	if (unFlag == SS_CREATE) {
+	if ((unFlag == SS_CREATE) || wrap_asset_flag) {
 		memcpy_s(&xOpenObject.sst_access_policy,
 			sizeof(sst_obj_config_t), pcxObjPolicy, sizeof(sst_obj_config_t));
 		xOpenObject.secure_store_flags = pcxObjPolicy->crypto_mode_flag | unFlag;
@@ -378,8 +394,8 @@ out:
  *  0 on success
  ==================================================================================================
  */
-int securestore_save(const sshandle_t xSsHandle, const unsigned char *pucDataBuf,
-						const unsigned int unDataLen)
+int securestore_save(const sshandle_t xSsHandle, const secure_wrap_asset_t *pxWrapConfig,
+						const unsigned char *pucDataBuf, const unsigned int unDataLen)
 {
     sst_data_param_t xSaveObject;
 	sst_fd_handle_t *sstFd = NULL;
@@ -397,11 +413,29 @@ int securestore_save(const sshandle_t xSsHandle, const unsigned char *pucDataBuf
 		goto out;
     }
 
+	/* Check if user has passed the valid asset number if wrap key is in OTP */
+	if (pxWrapConfig && pxWrapConfig->key_location) {
+		if (pxWrapConfig->key_location & KEY_IN_OTP) { /* 0b01 - OTP */
+			if ((pxWrapConfig->u.asset_number < MIN_OTP_ASSET_ID) ||
+			    (pxWrapConfig->u.asset_number > MAX_OTP_ASSET_ID)) {
+				LOGF_LOG_ERROR("<Secure store> Invalid wrap key configuration");
+				nRet = -SST_INVALID_ASSET_ID_ERROR;
+				goto out;
+			}
+		}
+	}
+
 	memset_s(&xSaveObject, sizeof(sst_data_param_t), 0,
 			sizeof(sst_data_param_t));
+
 	xSaveObject.ss_handle = xSsHandle;
 	xSaveObject.payload_len = unDataLen;
 	xSaveObject.payload = pucDataBuf;
+
+	if (pxWrapConfig) {
+		memcpy_s(&xSaveObject.wrap_asset,
+			sizeof(secure_wrap_asset_t), pxWrapConfig, sizeof(secure_wrap_asset_t));
+	}
 
 	sstFd = find_sstObject_by_ssHandle(xSsHandle);
 	if (sstFd == NULL) {
@@ -441,8 +475,8 @@ out:
  *  0 on success
  ==================================================================================================
  */
-int securestore_retrieve(const sshandle_t xSsHandle, unsigned char *pucDataBuf,
-					const unsigned int unDataLen, unsigned int *punActDataLen)
+int securestore_retrieve(const sshandle_t xSsHandle, const secure_wrap_asset_t *pxWrapConfig,
+					unsigned char *pucDataBuf, const unsigned int unDataLen, unsigned int *punActDataLen)
 {
     sst_data_param_t xLoadObject;
 	sst_fd_handle_t *sstFd = NULL;
@@ -460,12 +494,29 @@ int securestore_retrieve(const sshandle_t xSsHandle, unsigned char *pucDataBuf,
 		goto out;
     }
 
+	/* Check if user has passed the valid asset number if wrap key is in OTP */
+	if (pxWrapConfig && pxWrapConfig->key_location) {
+		if (pxWrapConfig->key_location & KEY_IN_OTP) { /* 0b01 - OTP */
+			if ((pxWrapConfig->u.asset_number < MIN_OTP_ASSET_ID) ||
+			    (pxWrapConfig->u.asset_number > MAX_OTP_ASSET_ID)) {
+				LOGF_LOG_ERROR("<Secure store> Invalid wrap key configuration");
+				nRet = -SST_INVALID_ASSET_ID_ERROR;
+				goto out;
+			}
+		}
+	}
+
 	memset_s(&xLoadObject, sizeof(sst_data_param_t), 0,
 			sizeof(sst_data_param_t));
 
 	xLoadObject.ss_handle = xSsHandle;
 	xLoadObject.payload_len = unDataLen;
 	xLoadObject.payload = pucDataBuf;
+
+	if (pxWrapConfig) {
+		memcpy_s(&xLoadObject.wrap_asset,
+			sizeof(secure_wrap_asset_t), pxWrapConfig, sizeof(secure_wrap_asset_t));
+	}
 
 	sstFd = find_sstObject_by_ssHandle(xSsHandle);
 	if (sstFd == NULL) {

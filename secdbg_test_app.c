@@ -288,7 +288,7 @@ int secdbg_store_authkey(sst_obj_config_t *pxSstConfig, int nPort,
 		return nRet;
 	}
 
-	nRet = securestore_save(xSsHandle, (uint8_t*)puAuthKey, nnAuthKeyLen);
+	nRet = securestore_save(xSsHandle, NULL, (uint8_t*)puAuthKey, nnAuthKeyLen);
 	if (nRet < 0) {
 		PRINT("securestore_save failed nRet:%d", nRet);
 		return nRet;
@@ -315,7 +315,7 @@ int secdbg_load_authkey(sst_obj_config_t *pxSstConfig, int nPort,
 		return nRet;
 	}
 
-	nRet = securestore_retrieve(xSsHandle, puAuthKey, (uint32_t)MAX_AUTHKEY_LEN,
+	nRet = securestore_retrieve(xSsHandle, NULL, puAuthKey, (uint32_t)MAX_AUTHKEY_LEN,
 			puAuthKeyLen);
 	if (nRet < 0) {
 		PRINT("securestore_save failed nRet:%d", nRet);
@@ -527,7 +527,7 @@ static int rsa_key_generate_and_store(enum sec_alg algo, int pub_key_len,
 	int i = 0;
 
 	/* Check data exists or not */
-	if (securestore_retrieve(handle, dummy_buf, sizeof(dummy_buf), &cont_len)) {
+	if (securestore_retrieve(handle, NULL, dummy_buf, sizeof(dummy_buf), &cont_len)) {
 		if (cont_len > 0) {
 			printf("Key information exists, want to overwrite y/n - ");
 			fflush(stdout);
@@ -580,7 +580,7 @@ static int rsa_key_generate_and_store(enum sec_alg algo, int pub_key_len,
 	buffer += sizeof(uint32_t);
 	memcpy(buffer, rsa_key->modulus.num_ptr, rsa_key->modulus.num_len);
 
-	if (securestore_save(handle, (const unsigned char *)meta, buf_len) < 0) {
+	if (securestore_save(handle, NULL, (const unsigned char *)meta, buf_len) < 0) {
 		free(meta);
 		return -1;
 	}
@@ -647,7 +647,7 @@ int secdbg_read_aes_wrapkey_and_store(uint16_t nPort, uint32_t nSstConfig,
 	pKeyMeta->sec_algo = SEC_ALG_AES_WRAP_UNWRAP;
 	pAESKey->key_len = AES_WRAP_KEY_LEN;
 	memcpy(pAESKey->key, pAESWrapKey, AES_WRAP_KEY_LEN);
-	nRet = securestore_save(sSstHandle, (const unsigned char *)pKeyMeta, nRet);
+	nRet = securestore_save(sSstHandle, NULL, (const unsigned char *)pKeyMeta, nRet);
 	free(pKeyMeta);
 	if (nRet < 0) {
 		PRINT("Failed to save AES Wrap key");
@@ -868,7 +868,7 @@ int secdbg_generate_wrapped_auth_key(uint16_t nPort, uint32_t nSstConfig,
 		return nRet;
 	}
 	*nWrapLen = wrap.output_size;
-	nRet = securestore_save(sSstHandle, (const uint8_t *)*pWrappedAuthKey, *nWrapLen);
+	nRet = securestore_save(sSstHandle, NULL, (const uint8_t *)*pWrappedAuthKey, *nWrapLen);
 	return nRet;
 }
 
@@ -888,7 +888,7 @@ int secdbg_wrap_authkey_exists(uint16_t nPort, uint32_t nSstConfig)
 		PRINT("unable to get secure storage handle for %s object", pcObjectName);
 		return nRet;
 	}
-	nRet = securestore_retrieve(sSstHandle, cDummyBuf, sizeof(cDummyBuf), &nLen);
+	nRet = securestore_retrieve(sSstHandle, NULL, cDummyBuf, sizeof(cDummyBuf), &nLen);
 	if ((nRet < 0) || !nLen) {
 		securestore_close(sSstHandle);
 		return nRet;
@@ -922,7 +922,7 @@ int secdbg_get_wrapped_auth_key(uint16_t nPort, uint32_t nSstConfig,
 	if (!*pWrappedAuthKey)
 		return -1;
 
-	nRet = securestore_retrieve(sSstHandle, *pWrappedAuthKey, MAX_WRAP_AUTHKEY_LEN,
+	nRet = securestore_retrieve(sSstHandle, NULL, *pWrappedAuthKey, MAX_WRAP_AUTHKEY_LEN,
 			nWrapLen);
 	if ((nRet < 0) || !(*nWrapLen)) {
 		free(*pWrappedAuthKey);
