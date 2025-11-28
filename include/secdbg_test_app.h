@@ -146,4 +146,5 @@ int secdbg_gen_crypto_sign(uint8_t *puNonce, uint32_t nLen,
  */
 int secdbg_delete_authkey(sst_obj_config_t *pcxObjConfig, int nPort);
 #endif
+int free_sec_store_objects(uint32_t nSstConfig, int nPort);
 #endif /* __SECDBG_TOOL */

@@ -45,10 +45,10 @@
 /* Max secure storage object name length */
 #define MAX_OBJ_NAME_LEN	32
 
-#define WRAP_AUTHKEY_PATH	"/private/port%d_wrap_authkey.txt"
+#define WRAP_AUTHKEY_PATH	"/tmp/port%d_wrap_authkey.txt"
 #define RANDOM_NONCE_PATH	"/tmp/port%d_RaRb.bin"
 #define SIGNATURE_PATH		"/tmp/port%d_sign.sign"
-#define GEN_SIGNATURE_CMD	"openssl dgst -sha256 -sign /private/port%d_prikey.pem -out /tmp/port%d_sign.sign /tmp/port%d_RaRb.bin"
+#define GEN_SIGNATURE_CMD	"openssl dgst -sha256 -sign /tmp/port%d_prikey.pem -out /tmp/port%d_sign.sign /tmp/port%d_RaRb.bin"
 
 #define INVALID_PORT(nPort)										\
 		(((nPort < SDBG_RESERVED_0_PORT) || (nPort > SDBG_RESERVED_7_PORT)) ? true : false)
@@ -126,6 +126,7 @@ try_read:
 		(*puAuthBuf) = nHex;
 		puAuthBuf ++;
 		nLen ++;
+		memset(nHexStr, 0x0, sizeof(nHexStr));
 	}
 	fclose(fp);
 	return nLen;
@@ -291,8 +292,10 @@ int secdbg_store_authkey(sst_obj_config_t *pxSstConfig, int nPort,
 	nRet = securestore_save(xSsHandle, NULL, (uint8_t*)puAuthKey, nnAuthKeyLen);
 	if (nRet < 0) {
 		PRINT("securestore_save failed nRet:%d", nRet);
+		securestore_close(xSsHandle);
 		return nRet;
 	}
+	securestore_close(xSsHandle);
 	return 0;
 }
 
@@ -319,9 +322,11 @@ int secdbg_load_authkey(sst_obj_config_t *pxSstConfig, int nPort,
 			puAuthKeyLen);
 	if (nRet < 0) {
 		PRINT("securestore_save failed nRet:%d", nRet);
+		securestore_close(xSsHandle);
 		return nRet;
 	}
 
+	securestore_close(xSsHandle);
 	return 0;
 }
 
@@ -368,7 +373,7 @@ static int secdbg_read_hexfile_to_bytes(const char *pcFile, uint8_t *pBuf, int n
 	uint8_t nHex = 0;
 	FILE *fp = NULL;
 	int nRet = -1;
-	int nLen = -1;
+	int nLen = 0;
 
 	if (fopen_s(&fp, pcFile, "r") != 0) {
 		PRINT("failed to open %s file", pcFile);
@@ -390,7 +395,8 @@ static int secdbg_read_hexfile_to_bytes(const char *pcFile, uint8_t *pBuf, int n
 			break;
 		}
 		STR_TO_HEX(nHexStr, nHex);
-		pBuf[++ nLen] = nHex;
+		pBuf[nLen ++] = nHex;
+		memset(nHexStr, 0x0, sizeof(nHexStr));
 		if (nLen > nBufLen)
 			break;
 	}
@@ -406,6 +412,17 @@ int secdbg_unwrap_kek(const char *pcFile, uint32_t nOffset, uint32_t *nAssetNumb
 	uint32_t origin = 0;
 	uint32_t nInputSize;
 	TEEC_Result result;
+	struct stat st = {0};
+
+	if (stat(pcFile, &st) == 0) {
+		if (st.st_size != WRAPPED_SDKEK_LEN*2) {
+			PRINT("wrapped SD_KEK number of chars expected:%d actual:%ld", WRAPPED_SDKEK_LEN*2, st.st_size);
+			return -1;
+		}
+	} else {
+		PRINT("stat failed for %s - %s\n", pcFile, strerror(errno));
+		return -1;
+	}
 
 	nInputSize = secdbg_read_hexfile_to_bytes(pcFile, nUnwrapInput, WRAPPED_SDKEK_LEN);
 	if (nInputSize != WRAPPED_SDKEK_LEN) {
@@ -610,9 +627,10 @@ int secdbg_read_aes_wrapkey_and_store(uint16_t nPort, uint32_t nSstConfig,
 	char pcObjectName[MAX_OBJ_NAME_LEN] = {0};
 	struct key_meta_info *pKeyMeta = NULL;
 	struct aes_key *pAESKey = NULL;
-	sst_obj_config_t sSstConfig;
+	sst_obj_config_t sSstConfig = {0};
 	sshandle_t sSstHandle = -1;
 	int nRet = -1;
+	struct stat st = {0};
 
 	if (!pAESWrapKeyFile || !pAESWrapKey) {
 		PRINT("invalid parameters");
@@ -629,7 +647,15 @@ int secdbg_read_aes_wrapkey_and_store(uint16_t nPort, uint32_t nSstConfig,
 		PRINT("unable to get secure storage handle for %s object", pcObjectName);
 		return -1;
 	}
-
+	if (stat((const char *)pAESWrapKeyFile, &st) == 0) {
+		if (st.st_size != AES_WRAP_KEY_LEN*2) {
+			PRINT("AES Wrap key number of chars expected:%d actual:%ld", AES_WRAP_KEY_LEN*2, st.st_size);
+			return -1;
+		}
+	} else {
+		PRINT("stat failed for %s - %s\n", (const char *)pAESWrapKeyFile, strerror(errno));
+		return -1;
+	}
 	nRet = secdbg_read_hexfile_to_bytes((const char *)pAESWrapKeyFile, pAESWrapKey,
 			AES_WRAP_KEY_LEN);
 	if (nRet != AES_WRAP_KEY_LEN) {
@@ -651,8 +677,10 @@ int secdbg_read_aes_wrapkey_and_store(uint16_t nPort, uint32_t nSstConfig,
 	free(pKeyMeta);
 	if (nRet < 0) {
 		PRINT("Failed to save AES Wrap key");
+		securestore_close(sSstHandle);
 		return nRet;
 	}
+	securestore_close(sSstHandle);
 	return 0;
 }
 
@@ -660,7 +688,7 @@ int secdbg_gen_rsa_keypair_and_cryptoformatstore(uint16_t nPort, uint32_t nSstCo
 		uint8_t **pKey, int *pLen, const uint8_t *pAESWrapKey)
 {
 	char pcObjectName[MAX_OBJ_NAME_LEN] = {0};
-	sst_obj_config_t sSstConfig;
+	sst_obj_config_t sSstConfig = {0};
 	struct rsa_key rsa_key = {0};
 	sshandle_t sSstHandle = -1;
 	uint32_t nAuthInfo;
@@ -708,6 +736,8 @@ free:
 		free(rsa_key.pri_exp.num_ptr);
 	if (rsa_key.modulus.num_ptr)
 		free(rsa_key.modulus.num_ptr);
+
+	securestore_close(sSstHandle);
 	return nRet;
 }
 
@@ -717,7 +747,7 @@ int secdbg_load_aes_wrap_key_to_tep(uint16_t nPort, enum key_types nType,
 	struct secure_storage_params sSstParams = {0};
 	char pcObjectName[MAX_OBJ_NAME_LEN] = {0};
 	struct seccrypto_load_key loadkey = {0};
-	sst_obj_config_t sSstConfig;
+	sst_obj_config_t sSstConfig = {0};
 	sshandle_t sSstHandle = -1;
 	TEEC_Operation op ={0};
 	uint32_t origin = 0;
@@ -754,6 +784,7 @@ int secdbg_load_aes_wrap_key_to_tep(uint16_t nPort, enum key_types nType,
 		securestore_close(sSstHandle);
 		return -1;
 	}
+	securestore_close(sSstHandle);
 	return 0;
 }
 
@@ -763,7 +794,7 @@ int secdbg_load_rsa_key_to_tep(uint16_t nPort, enum key_types nType,
 	struct secure_storage_params sSstParams = {0};
 	char pcObjectName[MAX_OBJ_NAME_LEN] = {0};
 	struct seccrypto_load_key loadkey = {0};
-	sst_obj_config_t sSstConfig;
+	sst_obj_config_t sSstConfig = {0};
 	sshandle_t sSstHandle = -1;
 	TEEC_Operation op ={0};
 	uint32_t origin = 0;
@@ -806,6 +837,7 @@ int secdbg_load_rsa_key_to_tep(uint16_t nPort, enum key_types nType,
 		securestore_close(sSstHandle);
 		return -1;
 	}
+	securestore_close(sSstHandle);
 	return 0;
 }
 
@@ -815,7 +847,7 @@ int secdbg_generate_wrapped_auth_key(uint16_t nPort, uint32_t nSstConfig,
 {
 	char pcObjectName[MAX_OBJ_NAME_LEN] = {0};
 	struct seccrypto_wrap_unwrap wrap = {0};
-	sst_obj_config_t sSstConfig;
+	sst_obj_config_t sSstConfig = {0};
 	sshandle_t sSstHandle = -1;
 	TEEC_Operation op = {0};
 	uint32_t origin = 0;
@@ -869,13 +901,14 @@ int secdbg_generate_wrapped_auth_key(uint16_t nPort, uint32_t nSstConfig,
 	}
 	*nWrapLen = wrap.output_size;
 	nRet = securestore_save(sSstHandle, NULL, (const uint8_t *)*pWrappedAuthKey, *nWrapLen);
+	securestore_close(sSstHandle);
 	return nRet;
 }
 
 int secdbg_wrap_authkey_exists(uint16_t nPort, uint32_t nSstConfig)
 {
 	char pcObjectName[MAX_OBJ_NAME_LEN + 1] = {0};
-	sst_obj_config_t sSstConfig;
+	sst_obj_config_t sSstConfig = {0};
 	sshandle_t sSstHandle = -1;
 	uint8_t cDummyBuf[10] = {0};
 	uint32_t nLen = 0;
@@ -893,6 +926,7 @@ int secdbg_wrap_authkey_exists(uint16_t nPort, uint32_t nSstConfig)
 		securestore_close(sSstHandle);
 		return nRet;
 	}
+	securestore_close(sSstHandle);
 	return nRet;
 }
 
@@ -900,7 +934,7 @@ int secdbg_get_wrapped_auth_key(uint16_t nPort, uint32_t nSstConfig,
 		uint8_t **pWrappedAuthKey, uint32_t *nWrapLen)
 {
 	char pcObjectName[MAX_OBJ_NAME_LEN] = {0};
-	sst_obj_config_t sSstConfig;
+	sst_obj_config_t sSstConfig = {0};
 	sshandle_t sSstHandle = -1;
 	int nRet = -1;
 
@@ -930,6 +964,7 @@ int secdbg_get_wrapped_auth_key(uint16_t nPort, uint32_t nSstConfig,
 		securestore_close(sSstHandle);
 		return nRet;
 	}
+	securestore_close(sSstHandle);
 	return nRet;
 }
 
@@ -995,6 +1030,49 @@ int secdbg_gen_crypto_sign(uint8_t *puNonce, uint32_t nLen,
 	}
 	*rsa_sign = rsa_sign_tmp;
 	return 0;
+}
+
+int free_sec_store_objects(uint32_t nSstConfig, int nPort)
+{
+	int nRet = 0;
+	sshandle_t sSstHandle = 0;
+	sst_obj_config_t sSstConfig = {0};
+	char pcObjectName[MAX_OBJ_NAME_LEN] = {0};
+
+	update_sst_config(nSstConfig, &sSstConfig);
+	snprintf(pcObjectName, MAX_OBJ_NAME_LEN, WRAPPED_AUTHKEY_OBJECT_NAME, nPort);
+	nRet = securestore_create_open(pcObjectName, &sSstConfig, 0, &sSstHandle);
+	if (nRet == SST_SUCCESS) {
+		nRet = securestore_delete(sSstHandle);
+		if (nRet < 0) {
+			PRINT("securestore_delete failed nRet:%d", nRet);
+			return nRet;
+		}
+	}
+
+	memset(pcObjectName, 0x0, MAX_OBJ_NAME_LEN);
+	snprintf(pcObjectName, MAX_OBJ_NAME_LEN, AES_WRAPKEY_OBJECT_NAME, nPort);
+	nRet = securestore_create_open(pcObjectName, &sSstConfig, 0, &sSstHandle);
+	if (nRet == SST_SUCCESS) {
+		nRet = securestore_delete(sSstHandle);
+		if (nRet < 0) {
+			PRINT("securestore_delete failed nRet:%d", nRet);
+			return nRet;
+		}
+	}
+
+	memset(pcObjectName, 0x0, MAX_OBJ_NAME_LEN);
+	snprintf(pcObjectName, MAX_OBJ_NAME_LEN, RSA_KEY_OBJECT_NAME, nPort);
+	nRet = securestore_create_open(pcObjectName, &sSstConfig, 0, &sSstHandle);
+	if (nRet == SST_SUCCESS) {
+		nRet = securestore_delete(sSstHandle);
+		if (nRet < 0) {
+			PRINT("securestore_delete failed nRet:%d", nRet);
+			return nRet;
+		}
+	}
+
+	return nRet;
 }
 #endif
 

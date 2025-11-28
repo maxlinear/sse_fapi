@@ -220,9 +220,7 @@ int secure_debug(uint16_t port_num, uint32_t sst_config, const uint8_t *kek_file
 	}
 
 	ret = secdbg_load_aes_wrap_key_to_tep(port_num, KEY_AES, sst_config);
-	if (ret == -EAGAIN) {
-		printf("RSA private exponent is plaintext\n");
-	} else if ( ret < 0) {
+	if ( ret < 0 && ret != -EAGAIN) {
 		fprintf(stderr, "failed to load AES wrap key\n");
 		goto wrap_auth_free;
 	}
@@ -268,5 +266,6 @@ rsa_sign_free:
 	free(rsa_sign);
 wrap_auth_free:
 	free(wrap_auth_key);
+	free_sec_store_objects(sst_config, port_num);
 	return ret;
 }

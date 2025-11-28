@@ -125,7 +125,6 @@ typedef struct uboot_value{
 */
 int fapi_ssImgAuth(img_param_t image_auth);
 
-#ifdef LINUX_UPGRADE
 /*! 
         \brief API to authenticate image
         \param[in] image type
@@ -139,7 +138,6 @@ int fapi_ssImgValidateAndCommit(char *image_type, int len);
         \return  UGW_SUCCESS on successful / UGW_FAILURE on failure
 */
 int fapi_ssImgUpgrade(img_param_t image_auth);
-#endif
 /*! 
         \brief API to get upgrade state 
         \param[in] ppcState
@@ -189,15 +187,6 @@ int fapi_ssSetCommitBank(unsigned char *pvalue);
         \return  UGW_SUCCESS on successful / UGW_FAILURE on failure
 */
 int fapi_ssSetUbootParam(char *pname, uboot_value_t *pvalue);
-
-/*! 
-        \brief API to get uboot param 
-        \param[in] pname 
-        \param[out] pvalue 
-        \param[in] env_valid
-        \return  UGW_SUCCESS on successful / UGW_FAILURE on failure
-*/
-int fapi_ssGetUbootParam(char *pname, uboot_value_t *pvalue, bool env_valid);
 
 /*! 
         \brief API to set udt param 

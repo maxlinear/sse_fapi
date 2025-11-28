@@ -681,6 +681,7 @@ int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
             }
             PRINT("ss handle received - [%ld]", xSsHandle);
             PRINT("created \"%s\" secure store object", pcObjectName);
+	    securestore_close(xSsHandle);
         break;
 
         cases(cStorageOps[4])
@@ -729,6 +730,7 @@ int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
             PRINT("\"%s\"", pcOrigData);
             free((void*)pcOrigData);
             pcOrigData = NULL;
+	    securestore_close(xSsHandle);
         break;
 
         cases(cStorageOps[5])
@@ -786,6 +788,7 @@ int secure_storage_option(char* pcStorageOp, const char *pcObjectName,
             PRINT("\"%s\"", pcLoadData);
             free(pcLoadData);
             pcLoadData = NULL;
+	    securestore_close(xSsHandle);
         break;
 
         cases(cStorageOps[6])
@@ -848,14 +851,18 @@ int secure_debug_option(uint16_t unPortNum, uint32_t unObjectConfig)
     uint32_t nAuthKeyLen = 0;
     int nNonceLen = sizeof(aNonceB);
     uint32_t nSize = 0;
-    uint32_t nIdx = 0;
     int nRet = -1;
+#ifdef ENABLE_DEBUG
+    uint32_t nIdx = 0;
+#endif
 
     PRINT("Port num is :%u", unPortNum);
 
     if (unObjectConfig != 0) {
         set_object_config(&xSstConfig, unObjectConfig);
+#ifdef ENABLE_DEBUG
         display_object_config(&xSstConfig);
+#endif
         if (xSstConfig.crypto_mode_flag != SS_CI) {
             PRINT("unsupported crypto mode flag");
             goto end;
@@ -878,11 +885,13 @@ int secure_debug_option(uint16_t unPortNum, uint32_t unObjectConfig)
         }
     }
 
+#ifdef ENABLE_DEBUG
     PRINT("Wrapped authentication key & length:%d", nAuthKeyLen);
     for (nIdx = 0; nIdx < nAuthKeyLen; nIdx++) {
         fprintf(stdout, "0x%x ", aAuthKey[nIdx]);
     }
     PRINT("");
+#endif
 
     nRet = securedebug_auth_init(unPortNum, aNonceB, (uint32_t*)&nNonceLen,
             aAuthKey, nAuthKeyLen);
@@ -904,11 +913,14 @@ int secure_debug_option(uint16_t unPortNum, uint32_t unObjectConfig)
         PRINT("signature generate failed");
         goto end;
     }
+
+#ifdef ENABLE_DEBUG
     PRINT("Signature for debug port:%u of size :%d", unPortNum, nSize);
     for (nIdx = 0; nIdx < nSize; nIdx++) {
         fprintf(stdout, "0x%02x ", aSignature[nIdx]);
     }
     PRINT("");
+#endif
 
     nRet = securedebug_auth_verify(unPortNum, aSignature, nSize, aNonceA,
             sizeof(aNonceA));
