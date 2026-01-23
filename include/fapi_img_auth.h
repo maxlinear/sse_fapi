@@ -197,6 +197,13 @@ int fapi_ssSetUbootParam(char *pname, uboot_value_t *pvalue);
 int fapi_ssSetUdt(unsigned char *pvalue,uint32_t ivalue);
 
 /*! 
+        \brief API to do image authentication 
+        \param[in] path 
+        \return 0 on successful / error code on failure
+*/
+int fapi_Image_Verify(const char *path);
+
+/*! 
         \brief API to do image upgrade from linux 
         \param[in] path 
         \return 0 on successful / error code on failure
