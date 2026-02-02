@@ -861,8 +861,10 @@ static void fapi_ssGetFileNameFromUboot(char *file_name, char *cPath)
 	char cmd[MAX_PATH_LEN] = {0};
 	int len;
 
-	if (strncmp(file_name, "kernel", sizeof("kernel")) == 0)
+	if (strncmp(file_name, "kernel", sizeof("kernel")) == 0 || strcmp(file_name, "kernel-dtb") == 0)
 		sprintf_s(cmd, sizeof(cmd), "uboot_env --get --name bootfile");
+	else if (strncmp(file_name, "filesystem", sizeof("filesystem")) == 0)
+		sprintf_s(cmd, sizeof(cmd), "uboot_env --get --name rootfs");
 	else
 		sprintf_s(cmd, sizeof(cmd), "uboot_env --get --name %s", file_name);
 
@@ -2267,7 +2269,7 @@ static int fapi_ssValidate_Image(const img_param_t img, bool upgrade)
 	int fullimage = 0;
 #endif
 	img_param_t img_param;
-
+	img_param.src_img_fd = img.src_img_fd;
 	header = img.src_img_addr;
 	do {
 		x_img_header = *((image_header_t *)header);
