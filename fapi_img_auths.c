@@ -50,6 +50,7 @@ static int fapi_ssImgValidate(img_param_t *pxImgParam, uint8_t upgradeOrCommit);
 #ifdef FIT_IMG
 static int fapi_ssValidateNestedFit(const void *fit, img_param_t image_auth, int *currentimage);
 static int fapi_ssUpgradeNestedFit(const void *fit, img_param_t image_auth, int *earlyboot);
+static const char *fapi_ssNormalizeFitNodeName(const char *node_name);
 #endif
 static int set_uboot_param_str(const char *var_name, const char* value);
 static int get_uboot_param(char *var_name, char *value);
@@ -323,7 +324,7 @@ static int fapi_ssValidateDTB(int nFd, const void *addr, uint8_t upgradeOrCommit
 			/* we authenticate only the image after the FIT headers */
 
 			header = data;
-			if(strcmp(fdt_get_name(addr, noffset, NULL), "uboot") == 0)
+			if ((strcmp(fdt_get_name(addr, noffset, NULL), "uboot") == 0) || (strcmp(fdt_get_name(addr, noffset, NULL), "u-boot") == 0))
 				nRet = fapi_ssvalidateImg(nFd, header + sizeof(image_header_t), len - sizeof(image_header_t) - BLW_LENGTH, upgradeOrCommit);
 			else
 				nRet = fapi_ssvalidateImg(nFd, header, len - BLW_LENGTH, upgradeOrCommit);
@@ -941,6 +942,10 @@ static int fapi_ssCheckFileSize(img_param_t image_auth)
 	int noffset, depth = 0;
 	int len = 0;
 	struct map_table map;
+#ifdef FIT_IMG
+	const char *cfg_name = NULL;
+	char cfg_name_buf[MAX_PATH_LEN] = {0};
+#endif
 
 	actbnk = fapi_ssCheckActiveBank();
 	if (!(actbnk == 'A' || actbnk == 'B')) {
@@ -955,8 +960,20 @@ static int fapi_ssCheckFileSize(img_param_t image_auth)
 		nRet = UGW_FAILURE;
 		goto finish;
 	}
+#ifdef FIT_IMG
+	cfg_name = fapi_ssNormalizeFitNodeName(image_auth.img_name);
+	if (!cfg_name) {
+		LOGF_LOG_ERROR("Invalid image name\n");
+		nRet = UGW_FAILURE;
+		goto finish;
+	}
+	strncpy_s(cfg_name_buf, sizeof(cfg_name_buf), cfg_name, strnlen(cfg_name, MAX_PATH_LEN));
+	nRet = parse_config(&map, cfg_name_buf);
+#else
 	nRet = parse_config(&map, image_auth.img_name);
+#endif
 	if (nRet == 1) {
+		LOGF_LOG_ERROR("Failed to parse config for %s\n", image_auth.img_name);
 		nRet = UGW_FAILURE;
 		goto finish;
 	}
@@ -1113,6 +1130,10 @@ int fapi_ssImgUpgrade(img_param_t image_auth)
 	int nLockFd = -1, nRetValue;
 	struct map_table map;
 	char rootfs_size[MAX_PATH_LEN] = {0};
+#ifdef FIT_IMG
+	const char *cfg_name = NULL;
+	char cfg_name_buf[MAX_PATH_LEN] = {0};
+#endif
 
 	nLockFd = fapi_Fileopen(LOCK_FILE, O_RDONLY, 0);
 	if (nLockFd < 0) {
@@ -1138,7 +1159,18 @@ int fapi_ssImgUpgrade(img_param_t image_auth)
 		nRet = UGW_FAILURE;
 		goto finish;
 	}
+#ifdef FIT_IMG
+	cfg_name = fapi_ssNormalizeFitNodeName(image_auth.img_name);
+	if (!cfg_name) {
+		LOGF_LOG_ERROR("Invalid image name\n");
+		nRet = UGW_FAILURE;
+		goto finish;
+	}
+	strncpy_s(cfg_name_buf, sizeof(cfg_name_buf), cfg_name, strnlen(cfg_name, MAX_PATH_LEN));
+	nRet = parse_config(&map, cfg_name_buf);
+#else
 	nRet = parse_config(&map, image_auth.img_name);
+#endif
 	if (nRet == 1) {
 		LOGF_LOG_ERROR("image_auth.img_name %s map.name %s not matched \n", image_auth.img_name, map.name);
 		nRet = UGW_FAILURE;
@@ -2056,6 +2088,24 @@ static int image_hdr_validation(image_header_t *pxImgHeader)
 	return 0;
 }
 #ifdef FIT_IMG
+
+static const char *fapi_ssNormalizeFitNodeName(const char *node_name)
+{
+	if (!node_name)
+		return NULL;
+
+	if (strcmp(node_name, "u-boot") == 0)
+		return "uboot";
+
+	if (strcmp(node_name, "kernel-1") == 0)
+		return "kernel-dtb";
+
+	if (strcmp(node_name, "rootfs") == 0)
+		return "filesystem";
+
+	return node_name;
+}
+
 int fapi_ssUpgradeNestedFit(const void *fit, img_param_t image_auth, int *early_boot)
 {
 	int noffset;
@@ -2087,7 +2137,9 @@ int fapi_ssUpgradeNestedFit(const void *fit, img_param_t image_auth, int *early_
 			}
 			memcpy(aligned_node_buf, data, len);
 			
-			node_name = fdt_get_name(fit, noffset, NULL);	
+			node_name = fdt_get_name(fit, noffset, NULL);
+			node_name = fapi_ssNormalizeFitNodeName(node_name);
+
 			if((strcmp(node_name, "uboot") == 0) || (strcmp(node_name, "tep") == 0)
 				|| (strcmp(node_name, "rbe") == 0)) {
 				*early_boot |= 1;
@@ -2191,8 +2243,10 @@ static int fapi_ssValidateNestedFit(const void *fit, img_param_t image_auth, int
 
 			memcpy(aligned_node_buf, data, len);
 			
-			node_name = fdt_get_name(fit, noffset, NULL);	
-			if(node_name && strcmp(node_name, "uboot") == 0) {
+			node_name = fdt_get_name(fit, noffset, NULL);
+			node_name = fapi_ssNormalizeFitNodeName(node_name);
+
+			if (node_name && strcmp(node_name, "uboot") == 0) {
 				*currentimage += BOOTLOADERFIT;
 			} else if(node_name && strcmp(node_name, "tep") == 0) {
 				*currentimage += TEPFIT;
@@ -2202,8 +2256,10 @@ static int fapi_ssValidateNestedFit(const void *fit, img_param_t image_auth, int
 				*currentimage += ROOTFSFIT;
 			} else if(node_name && strcmp(node_name, "rbe") == 0) {
 				*currentimage += RBE;
+			} else if(node_name && (strcmp(node_name, "fdt-1") == 0 || strcmp(node_name, "fdt-2") == 0)) {
+				continue;
 			} else {
-				fprintf(stderr, "upgrade is not supported for %s, continuing with next image\n", image_auth.img_name);
+				fprintf(stderr, "Skipping unsupported FIT node during validation: %s\n", node_name ? node_name : "<null>");
 				continue;
 			}
 			strncpy_s(image_auth.img_name, sizeof(image_auth.img_name), node_name, (strlen("node_name")+1));
@@ -2697,6 +2753,80 @@ finish:
 		close(file_fd);
 	return ret;
 }
+
+int fapi_Ext4_Image_Verify(const char *path)
+{
+	int ret = 0;
+	char mnt_template[] = "/tmp/secupg_ext4_XXXXXX";
+	char *mnt_dir = NULL;
+	bool mounted = false;
+	char cmd[MAX_PATH_LEN * 2] = {0};
+
+	if (!path || path[0] == '\0') {
+		fprintf(stderr, "Invalid ext4 image path\n");
+		return -EINVAL;
+	}
+
+	/* Create unique mount directory */
+	mnt_dir = mkdtemp(mnt_template);
+	if (!mnt_dir) {
+		fprintf(stderr, "mkdtemp failed: %s\n", strerror(errno));
+		return -errno;
+	}
+
+	/* Mount ext4 image with read-only options to preserve hash */
+	snprintf(cmd, sizeof(cmd), "mount -o loop,ro,noload,norecovery -t ext4 '%s' '%s'", path, mnt_dir);
+	ret = system(cmd);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to mount ext4 image '%s' at '%s'\n", path, mnt_dir);
+		ret = -EPERM;
+		goto cleanup;
+	}
+	mounted = true;
+
+	/* Authenticate mandatory ITBs inside the mounted image */
+	static const char *itb_files[] = { "kernel.itb", "rootfs.itb" };
+	for (size_t i = 0; i < (sizeof(itb_files) / sizeof(itb_files[0])); i++) {
+		char itb_path[MAX_PATH_LEN * 2] = {0};
+		struct stat st;
+
+		snprintf(itb_path, sizeof(itb_path), "%s/%s", mnt_dir, itb_files[i]);
+
+		if (stat(itb_path, &st) != 0) {
+			fprintf(stderr, "File not found in ext4 image: %s (%s)\n", itb_path, strerror(errno));
+			ret = -ENOENT;
+			goto cleanup;
+		}
+		if (!S_ISREG(st.st_mode)) {
+			fprintf(stderr, "Not a regular file: %s\n", itb_path);
+			ret = -EINVAL;
+			goto cleanup;
+		}
+
+		fprintf(stdout, "Authenticating %s...\n", itb_files[i]);
+		ret = fapi_Image_Verify(itb_path);
+		if (ret != 0) {
+			fprintf(stderr, "Authentication failed for %s\n", itb_path);
+			goto cleanup;
+		}
+		fprintf(stdout, "Authentication successful for %s\n", itb_files[i]);
+	}
+
+cleanup:
+	if (mounted) {
+		memset(cmd, 0, sizeof(cmd));
+		snprintf(cmd, sizeof(cmd), "umount '%s'", mnt_dir);
+		system(cmd);
+	}
+
+	/* Remove directory */
+	memset(cmd, 0, sizeof(cmd));
+	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", mnt_dir);
+	system(cmd);
+
+	return ret;
+}
+
 /**=====================================================================
  * @brief  image upgrade from linux
  *

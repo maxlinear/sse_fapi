@@ -204,6 +204,13 @@ int fapi_ssSetUdt(unsigned char *pvalue,uint32_t ivalue);
 int fapi_Image_Verify(const char *path);
 
 /*! 
+        \brief API to do ext4 image authentication 
+        \param[in] path 
+        \return 0 on successful / error code on failure
+*/
+int fapi_Ext4_Image_Verify(const char *path);
+
+/*! 
         \brief API to do image upgrade from linux 
         \param[in] path 
         \return 0 on successful / error code on failure
