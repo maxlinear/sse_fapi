@@ -212,7 +212,6 @@ static int securestore_delete_close(sst_param_t xDelObject)
 	if ((nRet = ioctl(sstFd->fd, SS_STG_DELETE_CLOSE, &xDelObject)) < 0) {
 		LOGF_LOG_ERROR("<Secure store> Failed to delete SST Obj with error : -%d\n", errno);
 		nRet = get_sst_fapi_error_code(errno);
-		goto out;
     }
 
 	/* Close SST FD entry */

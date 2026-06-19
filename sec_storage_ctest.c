@@ -33,7 +33,7 @@
 #include "safe_mem_lib.h"
 
 #define HEADER_SIZE     276
-#define DATA_FILE       "/opt/intel/csd/etc/datacfg"
+#define DATA_FILE       "/dev/random"
 #define ATOM_MSG        "Hello, I'm Atom"
 #define MOD_MSG         "Content is modified"
 #define MAX_DATA_BUF    (1024 * 1024)
