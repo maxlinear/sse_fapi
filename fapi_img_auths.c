@@ -51,6 +51,8 @@ static int fapi_ssImgValidate(img_param_t *pxImgParam, uint8_t upgradeOrCommit);
 static int fapi_ssValidateNestedFit(const void *fit, img_param_t image_auth, int *currentimage);
 static int fapi_ssUpgradeNestedFit(const void *fit, img_param_t image_auth, int *earlyboot);
 static const char *fapi_ssNormalizeFitNodeName(const char *node_name);
+static int fapi_ssSWURenameBackupFiles(void);
+static int fapi_ssCleanupPartitionFiles(const char *mnt_path, bool keep_itbs);
 #endif
 static int set_uboot_param_str(const char *var_name, const char* value);
 static int get_uboot_param(char *var_name, char *value);
@@ -109,6 +111,11 @@ static const int image_list[] = {
 /* for other flash we need to see how fetch this count */
 #define LOCK_FILE "/opt/intel/etc/sse/sse_lock"
 #define CONFIG_FILE "/opt/intel/etc/sse/config_partition.yaml"
+
+/* Set to 1 by sec_upgrade when -u swu <image> is used */
+int g_swu_upgrade_mode = 0;
+
+#define IMAGE_PRE_LOAD_SIG_MAGIC 0x55425348
 
 #ifdef IMG_AUTH
 #define EMMC_PAGE_SIZE 0x800
@@ -306,7 +313,8 @@ static int fapi_ssValidateDTB(int nFd, const void *addr, uint8_t upgradeOrCommit
 		noffset = fdt_next_node(addr, noffset, &depth);
 		if (depth < 1)
 			break;
-		if (upgradeOrCommit && (strcmp(fdt_get_name(addr, noffset, NULL), "device-tree") == 0)) {
+		if (upgradeOrCommit && (strcmp(fdt_get_name(addr, noffset, NULL), "device-tree") == 0 ||
+				strncmp(fdt_get_name(addr, noffset, NULL), "fdt", 3) == 0)) {
 			fprintf(stderr,"device-tree image, nothing to be handlled while commit operation\n");
 			continue;
 		} 
@@ -423,7 +431,19 @@ static char *fapi_ssGetParitionNameEMMC(char *image_type, char bank)
 	actbnk = fapi_ssCheckActiveBank();
 	if ((strcmp(image_type, "kernel") == 0) || (strcmp(image_type, "rootfs") == 0))
 #ifdef FIT_IMG
-		sprintf_s(name, sizeof(name), "kernel-%s", (actbnk == 'A' ? ACTIVE_PART_NAME : INACTIVE_PART_NAME));
+	{
+		/* SWU upgrade always writes to kernel-active (bank A). Detect SWU
+		 * by checking bootfile env var: it is set to /kernel.itb during
+		 * SWU upgrade and persists across reboots. */
+		char bootfile_val[MAX_PATH_LEN] = {0};
+		const char *late_part;
+		if (get_uboot_param("bootfile", bootfile_val) == 0 &&
+				strstr(bootfile_val, "kernel.itb") != NULL)
+			late_part = ACTIVE_PART_NAME;
+		else
+			late_part = (actbnk == 'A' ? ACTIVE_PART_NAME : INACTIVE_PART_NAME);
+		sprintf_s(name, sizeof(name), "kernel-%s", late_part);
+	}
 	else
 		sprintf_s(name, sizeof(name), "%s-%s", image_type, (bank == 'a' ? ACTIVE_PART_NAME : INACTIVE_PART_NAME));
 #else
@@ -463,7 +483,14 @@ static void fapi_ssUnmountEMMC(void)
 
 	actbnk = fapi_ssCheckActiveBank();
 #ifdef FIT_IMG
-	sprintf_s(name, sizeof(name), "kernel-%s", (actbnk == 'A' ? ACTIVE_PART_NAME : INACTIVE_PART_NAME));
+	char bootfile_val[MAX_PATH_LEN] = {0};
+	const char *late_part;
+	if (get_uboot_param("bootfile", bootfile_val) == 0 &&
+			strstr(bootfile_val, "kernel.itb") != NULL)
+		late_part = ACTIVE_PART_NAME;
+	else
+		late_part = (actbnk == 'A' ? ACTIVE_PART_NAME : INACTIVE_PART_NAME);
+	sprintf_s(name, sizeof(name), "kernel-%s", late_part);
 #else
 	sprintf_s(name, sizeof(name), "extended_boot_%c", (actbnk == 'A' ? tolower('A'): tolower('B')));
 #endif
@@ -990,20 +1017,21 @@ static int fapi_ssCheckFileSize(img_param_t image_auth)
 				sprintf_s(name, sizeof(name), "%s_a", map.part);
 #endif
 		} else {
-			/* Late boot component always written in non-active bank */
+			/* Late boot component written in non-active bank normally,
+			 * or active bank in swu mode */
 			if (boardtype == FLASH_TYPE_EMMC) {
 #ifdef FIT_IMG
-				sprintf_s(name, sizeof(name), "%s-%s", map.part, (actbnk == 'A' ? INACTIVE_PART_NAME : ACTIVE_PART_NAME));
+				sprintf_s(name, sizeof(name), "%s-%s", map.part, (g_swu_upgrade_mode ? ACTIVE_PART_NAME : (actbnk == 'A' ? INACTIVE_PART_NAME : ACTIVE_PART_NAME)));
 #else
-				sprintf_s(name, sizeof(name), "%s_%c", map.part, (actbnk == 'A' ? tolower('B'): tolower('A')));
+				sprintf_s(name, sizeof(name), "%s_%c", map.part, (g_swu_upgrade_mode ? 'a' : (actbnk == 'A' ? tolower('B'): tolower('A'))));
 			} else {
 				/* for NAND model partition name like roofs_*, kernel_* and dtb_* */
 				if (strncmp(image_auth.img_name, "rootfs", sizeof(image_auth.img_name)) == 0)
-					sprintf_s(name, sizeof(name), "rootfs_%c", (actbnk == 'A' ? tolower('B'): tolower('A')));
+					sprintf_s(name, sizeof(name), "rootfs_%c", (g_swu_upgrade_mode ? 'a' : (actbnk == 'A' ? tolower('B'): tolower('A'))));
 				else if (strncmp(image_auth.img_name, "kernel", sizeof(image_auth.img_name)) == 0)
-					sprintf_s(name, sizeof(name), "kernel_%c", (actbnk == 'A' ? tolower('B'): tolower('A')));
+					sprintf_s(name, sizeof(name), "kernel_%c", (g_swu_upgrade_mode ? 'a' : (actbnk == 'A' ? tolower('B'): tolower('A'))));
 				else
-					sprintf_s(name, sizeof(name), "%s_%c", map.part, (actbnk == 'A' ? tolower('B'): tolower('A')));
+					sprintf_s(name, sizeof(name), "%s_%c", map.part, (g_swu_upgrade_mode ? 'a' : (actbnk == 'A' ? tolower('B'): tolower('A'))));
 #endif
 			}
 		}
@@ -1130,6 +1158,7 @@ int fapi_ssImgUpgrade(img_param_t image_auth)
 	int nLockFd = -1, nRetValue;
 	struct map_table map;
 	char rootfs_size[MAX_PATH_LEN] = {0};
+	char old_filesize[MAX_PATH_LEN] = {0};
 #ifdef FIT_IMG
 	const char *cfg_name = NULL;
 	char cfg_name_buf[MAX_PATH_LEN] = {0};
@@ -1214,20 +1243,21 @@ int fapi_ssImgUpgrade(img_param_t image_auth)
 				}
 			}
 		} else {
-			/* Late boot component always written in non-active bank */
+			/* Late boot component written in non-active bank normally,
+			 * or active bank in swu mode */
 			if (boardtype == FLASH_TYPE_EMMC) {
 #ifdef FIT_IMG
-				sprintf_s(name, sizeof(name), "%s-%s", map.part, (actbnk == 'A' ? INACTIVE_PART_NAME : ACTIVE_PART_NAME));
+				sprintf_s(name, sizeof(name), "%s-%s", map.part, (g_swu_upgrade_mode ? ACTIVE_PART_NAME : (actbnk == 'A' ? INACTIVE_PART_NAME : ACTIVE_PART_NAME)));
 #else
-				sprintf_s(name, sizeof(name), "%s_%c", map.part, (actbnk == 'A' ? tolower('B'): tolower('A')));
+				sprintf_s(name, sizeof(name), "%s_%c", map.part, (g_swu_upgrade_mode ? 'a' : (actbnk == 'A' ? tolower('B'): tolower('A'))));
 			} else {
 				/* for NAND model partition name like roofs_*, kernel_* and dtb_* */
 				if (strncmp(image_auth.img_name, "rootfs", sizeof(image_auth.img_name)) == 0)
-					sprintf_s(name, sizeof(name), "rootfs_%c", (actbnk == 'A' ? tolower('B'): tolower('A')));
+					sprintf_s(name, sizeof(name), "rootfs_%c", (g_swu_upgrade_mode ? 'a' : (actbnk == 'A' ? tolower('B'): tolower('A'))));
 				else if (strncmp(image_auth.img_name, "kernel", sizeof(image_auth.img_name)) == 0)
-					sprintf_s(name, sizeof(name), "kernel_%c", (actbnk == 'A' ? tolower('B'): tolower('A')));
+					sprintf_s(name, sizeof(name), "kernel_%c", (g_swu_upgrade_mode ? 'a' : (actbnk == 'A' ? tolower('B'): tolower('A'))));
 				else
-					sprintf_s(name, sizeof(name), "%s_%c", map.part, (actbnk == 'A' ? tolower('B'): tolower('A')));
+					sprintf_s(name, sizeof(name), "%s_%c", map.part, (g_swu_upgrade_mode ? 'a' : (actbnk == 'A' ? tolower('B'): tolower('A'))));
 #endif
 			}
 		}
@@ -1253,6 +1283,11 @@ int fapi_ssImgUpgrade(img_param_t image_auth)
 					LOGF_LOG_DEBUG("mount success\n");
 				}
 				memset(dev_path, 0, sizeof(dev_path));
+#ifdef FIT_IMG
+				if (g_swu_upgrade_mode)
+					fapi_ssCleanupPartitionFiles(mnt_path, true);
+				LOGF_LOG_DEBUG("Cleaned old files from %s\n", mnt_path);
+#endif
 				fapi_ssGetFileNameFromUboot(map.name, cPath);
 				if (cPath[0] == '\0') {
 					LOGF_LOG_ERROR("Error dev_path %s not valid for kernel!\n", mnt_path);
@@ -1278,6 +1313,7 @@ int fapi_ssImgUpgrade(img_param_t image_auth)
 #else
 			if (strncmp(map.name, "firmware", sizeof(map.name)) == 0) {
 #endif
+				/* Capture old _a_ (= bank B size) before overwriting */
 				if (set_uboot_param_str("tep_firmware_a_filesize", rootfs_size) != 0) {
 					fprintf(stderr, "Setting the tep_firmware_a_filesize value Failed\n");
 					nRet = -EINVAL;
@@ -1312,16 +1348,49 @@ int fapi_ssImgUpgrade(img_param_t image_auth)
 #else
 							if (strncmp(map.name, "rootfs", sizeof(map.name)) == 0) {
 #endif
-								if (set_uboot_param_str("rootfs_b_filesize", rootfs_size) != 0) {
-									fprintf(stderr, "Setting the rootfs_b_filesize value Failed\n");
-									nRet = -EINVAL;
-									goto finish;
+								/* SWU: write to A → set _a_, ensure _b_ exists (backup set it; fallback here)
+								 * non-SWU: write to B → set _b_, also set _a_ = old bank A size */
+								memset(old_filesize, 0, sizeof(old_filesize));
+								if (g_swu_upgrade_mode) {
+									get_uboot_param("rootfs_b_filesize", old_filesize);
+									if (set_uboot_param_str("rootfs_a_filesize", rootfs_size) != 0) {
+										fprintf(stderr, "Setting the rootfs_a_filesize value Failed\n");
+										nRet = -EINVAL;
+										goto finish;
+									}
+									/* _b_ set by backup; ensure it exists as fallback */
+									if (old_filesize[0] == '\0')
+										set_uboot_param_str("rootfs_b_filesize", rootfs_size);
+								} else {
+									get_uboot_param("rootfs_a_filesize", old_filesize);
+									if (set_uboot_param_str("rootfs_b_filesize", rootfs_size) != 0) {
+										fprintf(stderr, "Setting the rootfs_b_filesize value Failed\n");
+										nRet = -EINVAL;
+										goto finish;
+									}
+									set_uboot_param_str("rootfs_a_filesize",
+										old_filesize[0] ? old_filesize : rootfs_size);
 								}
 							} else {
-								if (set_uboot_param_str("kernel_b_filesize", rootfs_size) != 0) {
-									fprintf(stderr, "Setting the kernel_b_filesize value Failed\n");
-									nRet = -EINVAL;
-									goto finish;
+								memset(old_filesize, 0, sizeof(old_filesize));
+								if (g_swu_upgrade_mode) {
+									get_uboot_param("kernel_b_filesize", old_filesize);
+									if (set_uboot_param_str("kernel_a_filesize", rootfs_size) != 0) {
+										fprintf(stderr, "Setting the kernel_a_filesize value Failed\n");
+										nRet = -EINVAL;
+										goto finish;
+									}
+									if (old_filesize[0] == '\0')
+										set_uboot_param_str("kernel_b_filesize", rootfs_size);
+								} else {
+									get_uboot_param("kernel_a_filesize", old_filesize);
+									if (set_uboot_param_str("kernel_b_filesize", rootfs_size) != 0) {
+										fprintf(stderr, "Setting the kernel_b_filesize value Failed\n");
+										nRet = -EINVAL;
+										goto finish;
+									}
+									set_uboot_param_str("kernel_a_filesize",
+										old_filesize[0] ? old_filesize : rootfs_size);
 								}
 							}
 						} else if (actbnk == 'B') {
@@ -1330,17 +1399,26 @@ int fapi_ssImgUpgrade(img_param_t image_auth)
 #else
 							if (strncmp(map.name, "rootfs", sizeof(map.name)) == 0) {
 #endif
+								/* Write to A → set _a_, also set _b_ = old bank B size */
+								memset(old_filesize, 0, sizeof(old_filesize));
+								get_uboot_param("rootfs_b_filesize", old_filesize);
 								if (set_uboot_param_str("rootfs_a_filesize", rootfs_size) != 0) {
 									fprintf(stderr, "Setting the rootfs_a_filesize value Failed\n");
 									nRet = -EINVAL;
 									goto finish;
 								}
+								set_uboot_param_str("rootfs_b_filesize",
+									old_filesize[0] ? old_filesize : rootfs_size);
 							} else {
+								memset(old_filesize, 0, sizeof(old_filesize));
+								get_uboot_param("kernel_b_filesize", old_filesize);
 								if (set_uboot_param_str("kernel_a_filesize", rootfs_size) != 0) {
 									fprintf(stderr, "Setting the kernel_a_filesize value Failed\n");
 									nRet = -EINVAL;
 									goto finish;
 								}
+								set_uboot_param_str("kernel_b_filesize",
+									old_filesize[0] ? old_filesize : rootfs_size);
 							}
 						}
 					if (umount(mnt_path) < 0) {
@@ -1591,6 +1669,13 @@ static int get_uboot_param(char *var_name, char *value)
 		return -ENOENT;
 	}
 	if (fread(name, 1, MAX_PATH_LEN, output) > 0) {
+		/* uboot_env prints "parameter <name> is not existed" to stdout when
+		 * the variable does not exist — detect this and treat as not-found
+		 * so callers never see the error string as the variable value. */
+		if (strstr(name, "not existed") != NULL) {
+			pclose(output);
+			return -ENOENT;
+		}
 		strncpy_s(value, MAX_PATH_LEN, name, MAX_PATH_LEN);
 		if (value[strnlen_s(name, MAX_PATH_LEN) - 1] == '\n')
 			value[strnlen_s(name, MAX_PATH_LEN) - 1] = 0;
@@ -1917,31 +2002,25 @@ int fapi_Image_commit(void)
 				ret = -EPERM;
 			}
 			memset(cPath, 0, sizeof(cPath));
-			if (get_uboot_param("uboot_b_filesize", cPath) != 0) {
-				fprintf(stderr, "Failed to get variable\n");
-				ret = -ENOENT;
-			}
-			if (set_uboot_param_str("uboot_a_filesize", cPath) != 0) {
-				fprintf(stderr, "Setting the uboot_a_filesize value Failed\n");
-				ret = -EINVAL;
+			if (get_uboot_param("uboot_b_filesize", cPath) == 0) {
+				if (set_uboot_param_str("uboot_a_filesize", cPath) != 0) {
+					fprintf(stderr, "Setting the uboot_a_filesize value Failed\n");
+					ret = -EINVAL;
+				}
 			}
 			memset(cPath, 0, sizeof(cPath));
-			if (get_uboot_param("tep_firmware_b_filesize", cPath) != 0) {
-				fprintf(stderr, "Failed to get variable\n");
-				ret = -ENOENT;
-			}
-			if (set_uboot_param_str("tep_firmware_a_filesize", cPath) != 0) {
-				fprintf(stderr, "Setting the tep_firmware_a_filesize value Failed\n");
-				ret = -EINVAL;
+			if (get_uboot_param("tep_firmware_b_filesize", cPath) == 0) {
+				if (set_uboot_param_str("tep_firmware_a_filesize", cPath) != 0) {
+					fprintf(stderr, "Setting the tep_firmware_a_filesize value Failed\n");
+					ret = -EINVAL;
+				}
 			}
 			memset(cPath, 0, sizeof(cPath));
-			if (get_uboot_param("rbe_b_filesize", cPath) != 0) {
-				fprintf(stderr, "Failed to get variable\n");
-				ret = -ENOENT;
-			}
-			if (set_uboot_param_str("rbe_a_filesize", cPath) != 0) {
-				fprintf(stderr, "Setting the rbe_a_filesize value Failed\n");
-				ret = -EINVAL;
+			if (get_uboot_param("rbe_b_filesize", cPath) == 0) {
+				if (set_uboot_param_str("rbe_a_filesize", cPath) != 0) {
+					fprintf(stderr, "Setting the rbe_a_filesize value Failed\n");
+					ret = -EINVAL;
+				}
 			}
 		}
 	} else {
@@ -2171,6 +2250,11 @@ int fapi_ssUpgradeNestedFit(const void *fit, img_param_t image_auth, int *early_
 					file_size = image_auth.src_img_len;
 					image_auth.src_img_len = file_read_size - pad - sizeof(image_header_t);
 					strncpy_s(image_auth.img_name, MAX_PATH_LEN, node_name, MAX_PATH_LEN);
+				} else if (ntohl(*(const uint32_t *)aligned_node_buf) == IMAGE_PRE_LOAD_SIG_MAGIC) {
+					fprintf(stdout, "Pre-load header detected for %s, preserving in partition\n",
+						node_name);
+					image_auth.src_img_addr = (unsigned char *)aligned_node_buf;
+					image_auth.src_img_len = len;
 				} else {
 					image_auth.src_img_addr = (unsigned char *)fit;
 					image_auth.src_img_len = fdt_totalsize(fit);
@@ -2290,7 +2374,7 @@ static int fapi_ssValidateNestedFit(const void *fit, img_param_t image_auth, int
 					file_size = image_auth.src_img_len;
 					image_auth.src_img_len = file_read_size - pad - sizeof(image_header_t);
 					strncpy_s(image_auth.img_name, MAX_PATH_LEN, node_name, MAX_PATH_LEN);
-				} else { 
+				} else {
 					image_auth.src_img_addr = (unsigned char *)fit;
 				}
 				fprintf(stdout, "Image authentication called for %s\n", image_auth.img_name);
@@ -2679,19 +2763,34 @@ dtb_finish:
 				ret = -ENOENT;
 				goto finish;
 			}
-			if (cPath[0] == 'A')
-				ret = set_uboot_param_str("active_bank", "B");
-			else if (cPath[0] == 'B')
-				ret = set_uboot_param_str("active_bank", "A");
-			else
-				ret = -EINVAL;
-			if (ret != 0) {
-				fprintf(stderr, "Toggle active bank Failed\n");
-				ret = -EINVAL;
-				goto finish;
+			/* In swu mode, always set active_bank to A */
+			if (g_swu_upgrade_mode) {
+				if (set_uboot_param_str("active_bank", "A") != 0) {
+					fprintf(stderr, "Setting the active bank to A Failed\n");
+					ret = -EINVAL;
+					goto finish;
+				}
+			} else {
+				if (cPath[0] == 'A')
+					ret = set_uboot_param_str("active_bank", "B");
+				else if (cPath[0] == 'B')
+					ret = set_uboot_param_str("active_bank", "A");
+				else
+					ret = -EINVAL;
+
+				if (ret != 0) {
+					fprintf(stderr, "Toggle active bank Failed\n");
+					ret = -EINVAL;
+					goto finish;
+				}
 			}
 			if (set_uboot_param_str("late_boot", "upgrade") != 0) {
 				fprintf(stderr, "Setting the late boot status Failed\n");
+				ret = -EINVAL;
+				goto finish;
+			}
+			if (set_uboot_param_str("boot_part", "active") != 0) {
+				fprintf(stderr, "Setting boot_part Failed\n");
 				ret = -EINVAL;
 				goto finish;
 			}
@@ -2827,6 +2926,221 @@ cleanup:
 	return ret;
 }
 
+#ifdef FIT_IMG
+/**=====================================================================
+ * @brief  Remove image files from an already-mounted partition.
+ *
+ * @param mnt_path   Path where the partition is mounted.
+ * @param keep_itbs  true  (SWU mode)    - remove all regular files EXCEPT
+ *                                         kernel.itb and rootfs.itb.
+ *                   false (normal mode) - remove only files whose names
+ *                                         match '*kernel*' or '*rootfs*'.
+ *
+ * @return UGW_SUCCESS on success, UGW_FAILURE on failure.
+ =======================================================================
+ */
+static int fapi_ssCleanupPartitionFiles(const char *mnt_path, bool keep_itbs)
+{
+	char cmd[MAX_PATH_LEN * 3] = {0};
+	int nRetValue;
+
+	if (keep_itbs)
+		sprintf_s(cmd, sizeof(cmd),
+			"find %s -maxdepth 1 -type f ! -name 'kernel.itb' ! -name 'rootfs.itb' -exec rm -f {} \\;",
+			mnt_path);
+
+	if (scapi_spawn(cmd, 1, &nRetValue) != UGW_SUCCESS || nRetValue != 0) {
+		fprintf(stderr, "Cleanup: failed to remove files from %s\n", mnt_path);
+		return UGW_FAILURE;
+	}
+	LOGF_LOG_DEBUG("Cleanup: removed files from %s\n", mnt_path);
+	return UGW_SUCCESS;
+}
+
+/**=====================================================================
+ * @brief  In SWU upgrade mode (-u swu), backup all files from the active
+ *         bank (A) to the inactive bank (B) before overwriting bank A.
+ *         All regular files are copied so that commit can later find and
+ *         rename them to standard itb names by searching for "kernel"
+ *         and "rootfs" substrings in filenames.
+ *
+ *         When active_bank=B the write target is already kernel-active
+ *         (bank A) — bank B keeps its own content, so no backup needed.
+ *
+ * @return UGW_SUCCESS on success, UGW_FAILURE on failure
+ =======================================================================
+ */
+static int fapi_ssSWUBackupBankA(void)
+{
+	char actbnk;
+	int boardtype;
+	char *part_name;
+	char name_active[MAX_PATH_LEN] = {0};
+	char name_inactive[MAX_PATH_LEN] = {0};
+	char mnt_active[MAX_PATH_LEN] = {0};
+	char mnt_inactive[MAX_PATH_LEN] = {0};
+	char dev_active[MAX_PATH_LEN] = {0};
+	char dev_inactive[MAX_PATH_LEN] = {0};
+	char size_val[MAX_PATH_LEN] = {0};
+	char cmd[MAX_PATH_LEN * 3] = {0};
+	int nRet = UGW_SUCCESS;
+	int nRetValue;
+
+	actbnk = fapi_ssCheckActiveBank();
+	if (actbnk != 'A') {
+		/* When active=B, SWU writes to kernel-active (bank A), which is
+		 * already the inactive/target side — bank B keeps its old content,
+		 * so no backup is required. */
+		fprintf(stdout, "SWU backup: active_bank=B, no backup needed\n");
+		return UGW_SUCCESS;
+	}
+
+	boardtype = check_boardtype();
+	if (boardtype != FLASH_TYPE_EMMC) {
+		fprintf(stdout, "SWU backup: not EMMC, skipping backup\n");
+		return UGW_SUCCESS;
+	}
+
+	/* Resolve partition names and device paths */
+	sprintf_s(name_active, sizeof(name_active), "kernel-%s", ACTIVE_PART_NAME);
+	sprintf_s(name_inactive, sizeof(name_inactive), "kernel-%s", INACTIVE_PART_NAME);
+
+	part_name = getDevFromPartition(name_active, 'b');
+	sprintf_s(dev_active, sizeof(dev_active), "/dev/%s", part_name);
+
+	part_name = getDevFromPartition(name_inactive, 'b');
+	sprintf_s(dev_inactive, sizeof(dev_inactive), "/dev/%s", part_name);
+
+	sprintf_s(mnt_active, sizeof(mnt_active), "/tmp/%s", name_active);
+	sprintf_s(mnt_inactive, sizeof(mnt_inactive), "/tmp/%s", name_inactive);
+
+	/* Mount active bank (may already be mounted — handled gracefully) */
+	nRet = fapi_ssMountLateboot(dev_active, mnt_active);
+	if (nRet != UGW_SUCCESS) {
+		LOGF_LOG_DEBUG("SWU backup: bank A already mounted\n");
+	}
+
+	/* Mount inactive bank */
+	nRet = fapi_ssMountLateboot(dev_inactive, mnt_inactive);
+	if (nRet != UGW_SUCCESS) {
+		LOGF_LOG_DEBUG("SWU backup: bank B already mounted\n");
+	}
+	nRet = UGW_SUCCESS;
+
+	/* Copy all regular files from bank A to bank B.
+	 * This preserves the pre-upgrade content regardless of filenames so
+	 * that commit can rename them to standard itb names by pattern search. */
+	sprintf_s(cmd, sizeof(cmd),
+		"find %s -maxdepth 1 -type f -exec cp {} %s/ \\;",
+		mnt_active, mnt_inactive);
+	if (scapi_spawn(cmd, 1, &nRetValue) != UGW_SUCCESS || nRetValue != 0) {
+		fprintf(stderr, "SWU backup: failed to copy files from bank A to bank B\n");
+		nRet = UGW_FAILURE;
+		goto umount_inactive;
+	}
+	fprintf(stdout, "SWU backup: copied all files from bank A to bank B\n");
+
+	/* Sync filesize env vars: bank B must know how many bytes U-Boot should load */
+	if (get_uboot_param("kernel_a_filesize", size_val) == 0 && size_val[0] != '\0') {
+		if (set_uboot_param_str("kernel_b_filesize", size_val) != 0) {
+			fprintf(stderr, "SWU backup: failed to sync kernel_a_filesize to kernel_b_filesize\n");
+		} else {
+			fprintf(stdout, "SWU backup: set kernel_b_filesize=%s\n", size_val);
+		}
+	}
+	memset(size_val, 0, sizeof(size_val));
+	if (get_uboot_param("rootfs_a_filesize", size_val) == 0 && size_val[0] != '\0') {
+		if (set_uboot_param_str("rootfs_b_filesize", size_val) != 0) {
+			fprintf(stderr, "SWU backup: failed to sync rootfs_a_filesize to rootfs_b_filesize\n");
+		} else {
+			fprintf(stdout, "SWU backup: set rootfs_b_filesize=%s\n", size_val);
+		}
+	}
+
+umount_inactive:
+	/* Unmount bank B — it is not needed during the subsequent upgrade writes */
+	if (umount(mnt_inactive) < 0) {
+		perror("SWU backup: unmount bank B error:");
+	}
+	memset(cmd, 0, sizeof(cmd));
+	sprintf_s(cmd, sizeof(cmd), "rm -rf %s\n", mnt_inactive);
+	scapi_spawn(cmd, 1, &nRetValue);
+
+	return nRet;
+}
+
+/**=====================================================================
+ * @brief  In SWU upgrade commit, rename backup files in the inactive
+ *         bank (B) so their names match the corresponding files in the
+ *         active bank (A).  The active-bank filenames are the authoritative
+ *         names: kernel file found by '*kernel*' pattern and rootfs file
+ *         found by '*rootfs*' pattern.  If the inactive file already has
+ *         the same name as in active, no rename is done.
+ *
+ * @return UGW_SUCCESS on success, UGW_FAILURE on failure
+ =======================================================================
+ */
+static int fapi_ssSWURenameBackupFiles(void)
+{
+	int boardtype;
+	char *part_name;
+	char name_inactive[MAX_PATH_LEN] = {0};
+	char mnt_inactive[MAX_PATH_LEN] = {0};
+	char dev_inactive[MAX_PATH_LEN] = {0};
+	char cmd[MAX_PATH_LEN * 3] = {0};
+	int nRet = UGW_SUCCESS;
+	int nRetValue;
+
+	boardtype = check_boardtype();
+	if (boardtype != FLASH_TYPE_EMMC) {
+		fprintf(stdout, "Rename backup images: not EMMC, skipping\n");
+		return UGW_SUCCESS;
+	}
+
+	sprintf_s(name_inactive, sizeof(name_inactive), "kernel-%s", INACTIVE_PART_NAME);
+	part_name = getDevFromPartition(name_inactive, 'b');
+	sprintf_s(dev_inactive, sizeof(dev_inactive), "/dev/%s", part_name);
+	sprintf_s(mnt_inactive, sizeof(mnt_inactive), "/tmp/%s", name_inactive);
+
+	nRet = fapi_ssMountLateboot(dev_inactive, mnt_inactive);
+	if (nRet != UGW_SUCCESS) {
+		LOGF_LOG_DEBUG("Rename: inactive bank already mounted\n");
+	}
+
+	/* Rename kernel file in inactive partition to kernel.itb */
+	sprintf_s(cmd, sizeof(cmd),
+		"find %s -maxdepth 1 -type f -name '*kernel*' ! -name 'kernel.itb' -exec mv {} %s/kernel.itb \\;",
+		mnt_inactive, mnt_inactive);
+	if (scapi_spawn(cmd, 1, &nRetValue) != UGW_SUCCESS || nRetValue != 0) {
+		fprintf(stderr, "Rename: failed to rename kernel file to kernel.itb in inactive partition\n");
+		nRet = UGW_FAILURE;
+	} else {
+		fprintf(stdout, "Rename: kernel file in inactive partition renamed to kernel.itb\n");
+	}
+
+	/* Rename rootfs file in inactive partition to rootfs.itb */
+	memset(cmd, 0, sizeof(cmd));
+	sprintf_s(cmd, sizeof(cmd),
+		"find %s -maxdepth 1 -type f -name '*rootfs*' ! -name 'rootfs.itb' -exec mv {} %s/rootfs.itb \\;",
+		mnt_inactive, mnt_inactive);
+	if (scapi_spawn(cmd, 1, &nRetValue) != UGW_SUCCESS || nRetValue != 0) {
+		fprintf(stderr, "Rename: failed to rename rootfs file to rootfs.itb in inactive partition\n");
+		nRet = UGW_FAILURE;
+	} else {
+		fprintf(stdout, "Rename: rootfs file in inactive partition renamed to rootfs.itb\n");
+	}
+
+	if (umount(mnt_inactive) < 0) {
+		perror("Rename: unmount inactive partition error:");
+	}
+	memset(cmd, 0, sizeof(cmd));
+	sprintf_s(cmd, sizeof(cmd), "rm -rf %s\n", mnt_inactive);
+	scapi_spawn(cmd, 1, &nRetValue);
+
+	return nRet;
+}
+#endif /* FIT_IMG */
+
 /**=====================================================================
  * @brief  image upgrade from linux
  *
@@ -2844,7 +3158,7 @@ int fapi_Image_upgrade(const char *path)
 	struct stat filestat = {0};
 	img_param_t img, img_param;
 	char cPath[MAX_PATH_LEN] = {0};
-	
+
 	if (get_uboot_param("udt_status", cPath) != 0) {
 		fprintf(stderr, "Failed to get variable\n");
 		ret = -ENOENT;
@@ -2914,6 +3228,27 @@ int fapi_Image_upgrade(const char *path)
 		ret = -ENOENT;
 		goto finish;
 	}
+	if (get_uboot_param("boot_part", cPath) != 0) {
+		if (add_uboot_param("boot_part", 0) != 0) {
+			fprintf(stderr, "Add boot_part variable Failed\n");
+			ret = -EINVAL;
+			goto finish;
+		}
+	}
+	if (g_swu_upgrade_mode) {
+		if (set_uboot_param_str("boot_part", "active") != 0) {
+			fprintf(stderr, "Setting boot_part Failed\n");
+			ret = -EINVAL;
+			goto finish;
+		}
+	} else {
+		if (set_uboot_param_str("boot_part", "invalid") != 0) {
+			fprintf(stderr, "Setting the boot_part Failed\n");
+			ret = -EINVAL;
+			goto finish;
+		}
+	}
+
 	val = atoi(cPath);
 
 	if (((val & RBE) == RBE) ||
@@ -2962,9 +3297,43 @@ int fapi_Image_upgrade(const char *path)
 		}
 #endif
 	}
+#ifdef FIT_IMG
+	/* In SWU mode with active_bank=A, backup bank A → bank B before writing
+	 * so the inactive bank holds the last-known-good image as a fallback. */
+	if (g_swu_upgrade_mode) {
+		/* Set new env var values after validation passes, before write */
+		if (set_uboot_param_str("bootfile", "/kernel.itb") != 0) {
+			fprintf(stderr, "Setting bootfile value Failed\n");
+			ret = -EINVAL;
+			goto finish;
+		}
+		if (set_uboot_param_str("rootfs", "/rootfs.itb") != 0) {
+			fprintf(stderr, "Setting rootfs value Failed\n");
+			ret = -EINVAL;
+			goto finish;
+		}
+
+		/* Backup all files from bank A to bank B */
+		ret = fapi_ssSWUBackupBankA();
+		if (ret != UGW_SUCCESS) {
+			fprintf(stderr, "SWU backup of bank A to bank B failed, aborting upgrade\n");
+			goto finish;
+		}
+
+		/* SWU mode: rename backup files in inactive bank (B) to match
+		 * active-bank filenames immediately after upgrade write succeeds. */
+		ret = fapi_ssSWURenameBackupFiles();
+		if (ret != UGW_SUCCESS) {
+			fprintf(stderr, "SWU upgrade: renaming backup files in bank B failed\n");
+			ret = -EPERM;
+			goto finish;
+		}
+	}
+#endif
 	ret = fapi_ssUpgradeImage(img);
-	if (ret == 0)
+	if (ret == 0) {
 		system("touch /tmp/.upg_progress");
+	}
 
 finish:
 	if ((img.src_img_addr != NULL) && (flag == 1)) {
