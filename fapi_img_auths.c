@@ -1908,10 +1908,38 @@ int fapi_Get_lastupg_time(char *value)
  *  error code on failure
  =======================================================================
  */
+/* Mark the pending upgrade as failed and clear its state so the device is
+ * not stuck at udt_status=UDT_NEW_IMAGE and can accept a new upgrade.
+ */
+static int reset_failed_upgrade(const char *date_string)
+{
+#ifdef FIT_IMG
+	if (set_uboot_param_str("last_upg_time", date_string) != 0)
+		fprintf(stderr, "Failed to set last_upg_time\n");
+	if (set_uboot_param_str("last_upg_status", "Failed") != 0)
+		fprintf(stderr, "Failed to set 'last_upg_status' as 'Failed'\n");
+#endif
+	if (set_uboot_param_int("upgrade_image", 0) != 0)
+		fprintf(stderr, "Failed to set 'upgrade_image' to 0\n");
+	if (set_uboot_param_int("rbe_size", 0) != 0)
+		fprintf(stderr, "Failed to set 'rbe_size' to 0\n");
+	if (set_uboot_param_str("early_boot", "valid") != 0)
+		fprintf(stderr, "Failed to set 'early_boot' as 'valid'\n");
+	if (set_uboot_param_str("late_boot", "valid") != 0)
+		fprintf(stderr, "Failed to set 'late_boot' as 'valid'\n");
+	if (set_uboot_param_int("udt_status", UDT_IMAGE_NO_ACTION) != 0) {
+		fprintf(stderr, "Fail to set 'udt_status' to zero\n");
+		return -EPERM;
+	}
+	return 0;
+}
+
 int fapi_Image_commit(void)
 {
 	int ret = 0, udt_status;
 	char cPath[MAX_PATH_LEN] = {0};
+	char early_boot[MAX_PATH_LEN] = {0};
+	char late_boot[MAX_PATH_LEN] = {0};
 	struct timespec ts;
 	struct tm *tm_info;
 	char date_string[MAX_PATH_LEN];
@@ -2009,7 +2037,27 @@ int fapi_Image_commit(void)
 			}
 		}
 	} else {
-		
+		/*
+		 * fapi_Image_upgrade() marks early_boot/late_boot 'invalid' before writing and
+		 * fapi_ssUpgradeImage() marks them 'upgrade' only after all images are written.
+		 * With udt_status 'UDT_NEW_IMAGE', the upgrade was interrupted (e.g. power loss) if:
+		 *  - both are still 'valid': cut before the flags were set, nothing written, or
+		 *  - either is still 'invalid': cut while images were being written.
+		 * The new image is incomplete, so do not commit; clear the pending upgrade state.
+		 */
+		get_uboot_param("early_boot", early_boot);
+		get_uboot_param("late_boot", late_boot);
+		if ((strncmp(early_boot, "invalid", strlen("invalid")) == 0) ||
+		    (strncmp(late_boot, "invalid", strlen("invalid")) == 0) ||
+		    ((strncmp(early_boot, "valid", strlen("valid")) == 0) &&
+		     (strncmp(late_boot, "valid", strlen("valid")) == 0))) {
+			fprintf(stderr, "Upgrade was interrupted before completion (early_boot=%s late_boot=%s), "
+					"nothing to commit. Resetting upgrade state\n", early_boot, late_boot);
+			if (reset_failed_upgrade(date_string) != 0)
+				return -EPERM;
+			return -ECANCELED;
+		}
+
 		fprintf(stdout, 
 			"A new S/W UPGRADE, in previous boot, was detected and accepted."
 			"Now Commiting the image.\n");
@@ -2125,6 +2173,10 @@ int fapi_Image_commit(void)
 		}
 	}
 finish:
+	if (set_uboot_param_int("udt_status", UDT_IMAGE_NO_ACTION) != 0) {
+		fprintf(stderr, "Fail to set 'udt_status' to zero\n");
+		return -EPERM;
+	}
 	return ret;
 }
 
@@ -3231,6 +3283,8 @@ int fapi_Image_upgrade(const char *path)
 		ret = -ENOENT;
 		goto finish;
 	}
+	val = atoi(cPath);
+
 	if (get_uboot_param("boot_part", cPath) != 0) {
 		if (add_uboot_param("boot_part", 0) != 0) {
 			fprintf(stderr, "Add boot_part variable Failed\n");
@@ -3251,8 +3305,6 @@ int fapi_Image_upgrade(const char *path)
 			goto finish;
 		}
 	}
-
-	val = atoi(cPath);
 
 	if (((val & RBE) == RBE) ||
 #ifdef FIT_IMG
