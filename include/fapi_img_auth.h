@@ -211,7 +211,15 @@ int fapi_Image_Verify(const char *path);
 int fapi_Ext4_Image_Verify(const char *path);
 
 /*! 
-        \brief API to do image upgrade from linux 
+        \brief API to do image upgrade from linux [from UPDK version below 9.2.10 to 9.2.10]
+        \param[in] path 
+        \return 0 on successful / error code on failure
+*/
+
+int fapi_swuImage_upgrade(const char *path);
+
+/*! 
+        \brief API to do image upgrade from linux
         \param[in] path 
         \return 0 on successful / error code on failure
 */
